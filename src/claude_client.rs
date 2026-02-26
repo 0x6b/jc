@@ -1,6 +1,7 @@
 use std::{
     io::Write,
     process::{Command, Stdio},
+    time::Duration,
 };
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -30,7 +31,7 @@ pub fn invoke_claude(request: &ClaudeRequest<'_>) -> Option<Value> {
             .ok()?,
     );
     spinner.set_message(request.spinner_message.to_string());
-    spinner.enable_steady_tick(std::time::Duration::from_millis(200));
+    spinner.enable_steady_tick(Duration::from_millis(200));
 
     debug!(
         command = %request.command,

@@ -106,8 +106,7 @@ impl CommitMessageGenerator {
             format!("{commit_type}: {title}")
         };
 
-        let message =
-            if body.is_empty() { full_title } else { format!("{full_title}\n\n{body}") };
+        let message = if body.is_empty() { full_title } else { format!("{full_title}\n\n{body}") };
         trace!(message = %message, "Claude CLI output");
         Some(message)
     }
@@ -122,14 +121,12 @@ impl Default for CommitMessageGenerator {
 /// Strips a conventional commit type prefix if the model redundantly included one in the title.
 /// e.g., "feat: add login" -> "add login", "add login" -> "add login"
 fn strip_type_prefix(title: &str) -> &str {
-    if let Some(m) = TYPE_PREFIX_RE.find(title) {
-        title[m.end()..].trim_start()
-    } else {
-        title
-    }
+    if let Some(m) = TYPE_PREFIX_RE.find(title) { title[m.end()..].trim_start() } else { title }
 }
 
 static TYPE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(?:feat|fix|refactor|docs|test|chore|style|perf|build|ci)(?:\([^)]+\))?(?:!)?:\s*")
-        .expect("Failed to compile type prefix regex")
+    Regex::new(
+        r"^(?:feat|fix|refactor|docs|test|chore|style|perf|build|ci)(?:\([^)]+\))?(?:!)?:\s*",
+    )
+    .expect("Failed to compile type prefix regex")
 });

@@ -34,9 +34,9 @@ use jj_lib::{
     merged_tree::MergedTree,
     object_id::ObjectId,
     op_store::RefTarget,
-    ref_name::RefName,
+    ref_name::{RefName, RemoteName},
     repo::{ReadonlyRepo, Repo, StoreFactories},
-    repo_path::RepoPathUiConverter,
+    repo_path::RepoPathUiConverter::Fs,
     revset::{
         RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
         RevsetWorkspaceContext, SymbolResolver, parse,
@@ -47,7 +47,7 @@ use jj_lib::{
     workspace::{Workspace, default_working_copy_factories},
 };
 use tracing::{debug, info, warn};
-use tracing_subscriber::fmt;
+use tracing_subscriber::{EnvFilter, fmt};
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Parser, Debug)]
@@ -318,10 +318,7 @@ async fn create_commit(
 #[tokio::main]
 async fn main() -> Result<()> {
     fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::WARN.into()),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::WARN.into()))
         .init();
 
     let args = Args::parse();
@@ -486,7 +483,7 @@ fn resolve_bookmark_target(
 
 fn find_default_base(repo: &Arc<ReadonlyRepo>) -> Result<String> {
     let view = repo.view();
-    let remote_name = jj_lib::ref_name::RemoteName::new("origin");
+    let remote_name = RemoteName::new("origin");
     let main_ref = RefName::new("main");
 
     let remote_symbol = main_ref.to_remote_symbol(remote_name);
@@ -514,7 +511,7 @@ fn evaluate_revset(
     let settings = repo.settings();
     let extensions = RevsetExtensions::new();
     let aliases_map: RevsetAliasesMap = AliasesMap::new();
-    let path_converter = RepoPathUiConverter::Fs {
+    let path_converter = Fs {
         cwd: workspace.workspace_root().to_path_buf(),
         base: workspace.workspace_root().to_path_buf(),
     };
@@ -638,10 +635,10 @@ async fn snapshot_working_copy(
 
 /// Get parent tree for a commit.
 fn get_parent_tree(repo: &ReadonlyRepo, commit: &Commit) -> MergedTree {
-    if let Some(parent_id) = commit.parent_ids().first() {
-        if let Ok(parent_commit) = repo.store().get_commit(parent_id) {
-            return parent_commit.tree();
-        }
+    if let Some(parent_id) = commit.parent_ids().first()
+        && let Ok(parent_commit) = repo.store().get_commit(parent_id)
+    {
+        return parent_commit.tree();
     }
     MergedTree::resolved(repo.store().clone(), repo.store().empty_tree_id().clone())
 }
@@ -726,7 +723,8 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Resul
     debug!(commit_message = %commit_message, "Generated commit message");
 
     let current_tree = wc_commit.tree();
-    let file_changes = get_file_change_summary(&get_parent_tree(&repo, &wc_commit), &current_tree).await;
+    let file_changes =
+        get_file_change_summary(&get_parent_tree(&repo, &wc_commit), &current_tree).await;
 
     info!("Creating commit");
     create_commit(workspace, &commit_message, current_tree, &file_changes).await?;
@@ -744,11 +742,7 @@ async fn run_describe(
     let repo = workspace.repo_loader().load_at_head()?;
     debug!("Loaded repository at head");
 
-    let repo = if revision == "@" {
-        snapshot_working_copy(workspace, &repo).await?
-    } else {
-        repo
-    };
+    let repo = if revision == "@" { snapshot_working_copy(workspace, &repo).await? } else { repo };
 
     let commit = resolve_single_commit(&repo, workspace, revision)?;
     let commit_id = commit.id().hex();
@@ -775,13 +769,18 @@ async fn run_describe(
     mut_repo.rebase_descendants()?;
     tx.commit(format!("describe revision {short_id} via ccc-jj"))?;
 
-    let file_changes = get_file_change_summary(&get_parent_tree(&repo, &commit), &commit.tree()).await;
+    let file_changes =
+        get_file_change_summary(&get_parent_tree(&repo, &commit), &commit.tree()).await;
 
     let title = format!(
         "{}{} {}",
         "Described change ".white().dimmed(),
         short_id.blue().dimmed(),
-        if revision == "@" { "".to_string() } else { format!("({})", revision).white().dimmed().to_string() },
+        if revision == "@" {
+            "".to_string()
+        } else {
+            format!("({revision})").white().dimmed().to_string()
+        },
     );
 
     print!("{}", format_box_with_title(&title, &description, 72));
