@@ -46,7 +46,7 @@ use jj_lib::{
     working_copy::SnapshotOptions,
     workspace::{Workspace, default_working_copy_factories},
 };
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 use tracing_subscriber::fmt;
 use unicode_width::UnicodeWidthStr;
 
@@ -615,6 +615,86 @@ fn set_bookmark(repo: &Arc<ReadonlyRepo>, name: &str, commit: &Commit) -> Result
     Ok(existed)
 }
 
+/// Snapshot the working copy and reload the repo to reflect the latest state.
+async fn snapshot_working_copy(
+    workspace: &Workspace,
+    repo: &Arc<ReadonlyRepo>,
+) -> Result<Arc<ReadonlyRepo>> {
+    debug!("Starting working copy mutation");
+    let mut locked_wc = workspace.working_copy().start_mutation()?;
+    let base_ignores = load_base_ignores(workspace.workspace_root())?;
+    let snapshot_options = SnapshotOptions {
+        base_ignores,
+        progress: None,
+        start_tracking_matcher: &jj_lib::matchers::EverythingMatcher,
+        force_tracking_matcher: &jj_lib::matchers::NothingMatcher,
+        max_new_file_size: 1024 * 1024 * 100,
+    };
+    let (_tree, _stats) = locked_wc.snapshot(&snapshot_options).await?;
+    debug!("Snapshot complete");
+    locked_wc.finish(repo.operation().id().clone()).await?;
+    workspace.repo_loader().load_at_head().map_err(Into::into)
+}
+
+/// Get parent tree for a commit.
+fn get_parent_tree(repo: &ReadonlyRepo, commit: &Commit) -> MergedTree {
+    if let Some(parent_id) = commit.parent_ids().first() {
+        if let Ok(parent_commit) = repo.store().get_commit(parent_id) {
+            return parent_commit.tree();
+        }
+    }
+    MergedTree::resolved(repo.store().clone(), repo.store().empty_tree_id().clone())
+}
+
+/// Generate a diff between a commit and its parent, with size validation.
+async fn generate_diff(repo: &ReadonlyRepo, commit: &Commit) -> Result<Option<String>> {
+    let current_tree = commit.tree();
+    let parent_tree = get_parent_tree(repo, commit);
+
+    if current_tree.tree_ids() == parent_tree.tree_ids() {
+        return Ok(None);
+    }
+
+    let collapse_matcher = build_collapse_matcher(&CONFIG.diff.collapse_patterns);
+    let diff = get_tree_diff(
+        repo,
+        &parent_tree,
+        &current_tree,
+        collapse_matcher.as_ref(),
+        CONFIG.diff.max_diff_lines,
+        CONFIG.diff.max_diff_bytes,
+    )
+    .await?;
+
+    if diff.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let diff_lines = diff.lines().count();
+    let diff_bytes = diff.len();
+    let max_lines = CONFIG.diff.max_total_diff_lines;
+    let max_bytes = CONFIG.diff.max_total_diff_bytes;
+
+    if diff_lines > max_lines || diff_bytes > max_bytes {
+        bail!(
+            "Diff too large: {diff_lines} lines / {diff_bytes} bytes (limits: {max_lines} lines / {max_bytes} bytes). \
+            Consider splitting changes or using `jj describe` to set the message manually."
+        );
+    }
+
+    Ok(Some(diff))
+}
+
+/// Generate a commit message from a diff using Claude.
+fn generate_message(diff: &str, language: &str, model: &str) -> Result<String> {
+    info!(language = %language, model = %model, "Generating commit message with Claude");
+    let generator = CommitMessageGenerator::new(language, model);
+    match generator.generate(diff) {
+        Some(msg) => Ok(msg),
+        None => bail!("Failed to generate commit message"),
+    }
+}
+
 async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head()?;
     debug!("Loaded repository at head");
@@ -626,91 +706,27 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Resul
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
     debug!(wc_commit_id = %wc_commit_id.hex(), "Working copy commit");
 
-    // Scope the working copy lock - it's automatically released at the end of this block
-    let (current_tree, parent_tree, diff) = {
-        debug!("Starting working copy mutation");
-        let mut locked_wc = workspace.working_copy().start_mutation()?;
+    if !wc_commit.description().is_empty() {
+        warn!(description = %wc_commit.description(), "Working copy already has description, skipping");
+        return Ok(());
+    }
 
-        let base_ignores = load_base_ignores(workspace.workspace_root())?;
-        debug!("Loaded base ignores");
+    let repo = snapshot_working_copy(workspace, &repo).await?;
+    let wc_commit = repo.store().get_commit(wc_commit_id)?;
 
-        let snapshot_options = SnapshotOptions {
-            base_ignores,
-            progress: None,
-            start_tracking_matcher: &jj_lib::matchers::EverythingMatcher,
-            force_tracking_matcher: &jj_lib::matchers::NothingMatcher,
-            max_new_file_size: 1024 * 1024 * 100,
-        };
-        debug!("Taking snapshot of working copy");
-        let (current_tree, _stats) = locked_wc.snapshot(&snapshot_options).await?;
-        debug!("Snapshot complete");
-
-        let parent_tree = if !wc_commit.parent_ids().is_empty() {
-            let parent_commit = repo.store().get_commit(&wc_commit.parent_ids()[0])?;
-            parent_commit.tree()
-        } else {
-            jj_lib::merged_tree::MergedTree::resolved(
-                repo.store().clone(),
-                repo.store().empty_tree_id().clone(),
-            )
-        };
-
-        if current_tree.tree_ids() == parent_tree.tree_ids() {
+    let diff = match generate_diff(&repo, &wc_commit).await? {
+        Some(diff) => diff,
+        None => {
             println!("No changes detected, nothing to commit");
             return Ok(());
         }
-        debug!("Changes detected in working copy");
-
-        if !wc_commit.description().is_empty() {
-            warn!(description = %wc_commit.description(), "Working copy already has description, skipping");
-            return Ok(());
-        }
-
-        debug!("Generating diff");
-        let collapse_matcher = build_collapse_matcher(&CONFIG.diff.collapse_patterns);
-        let diff = get_tree_diff(
-            &repo,
-            &parent_tree,
-            &current_tree,
-            collapse_matcher.as_ref(),
-            CONFIG.diff.max_diff_lines,
-            CONFIG.diff.max_diff_bytes,
-        )
-        .await?;
-        debug!(diff_len = diff.len(), "Diff generated");
-        trace!(diff = %diff, "Full diff content");
-
-        if diff.trim().is_empty() {
-            println!("Empty diff, nothing to commit");
-            return Ok(());
-        }
-
-        let diff_lines = diff.lines().count();
-        let diff_bytes = diff.len();
-        let max_lines = CONFIG.diff.max_total_diff_lines;
-        let max_bytes = CONFIG.diff.max_total_diff_bytes;
-
-        if diff_lines > max_lines || diff_bytes > max_bytes {
-            bail!(
-                "Diff too large to generate commit message: {diff_lines} lines / {diff_bytes} bytes (limits: {max_lines} lines / {max_bytes} bytes). \
-                Consider committing in smaller chunks or using `jj describe` to set the message manually."
-            );
-        }
-
-        (current_tree, parent_tree, diff)
-    }; // locked_wc is automatically dropped here
-
-    info!(language = %language, model = %model, "Generating commit message with Claude");
-    let generator = CommitMessageGenerator::new(language, model);
-    let commit_message = match generator.generate(&diff) {
-        Some(msg) => msg,
-        None => {
-            bail!("Failed to generate commit message, aborting commit");
-        }
     };
+
+    let commit_message = generate_message(&diff, language, model)?;
     debug!(commit_message = %commit_message, "Generated commit message");
 
-    let file_changes = get_file_change_summary(&parent_tree, &current_tree).await;
+    let current_tree = wc_commit.tree();
+    let file_changes = get_file_change_summary(&get_parent_tree(&repo, &wc_commit), &current_tree).await;
 
     info!("Creating commit");
     create_commit(workspace, &commit_message, current_tree, &file_changes).await?;
@@ -728,20 +744,8 @@ async fn run_describe(
     let repo = workspace.repo_loader().load_at_head()?;
     debug!("Loaded repository at head");
 
-    // For @, snapshot working copy first so the tree is up-to-date
     let repo = if revision == "@" {
-        let mut locked_wc = workspace.working_copy().start_mutation()?;
-        let base_ignores = load_base_ignores(workspace.workspace_root())?;
-        let snapshot_options = SnapshotOptions {
-            base_ignores,
-            progress: None,
-            start_tracking_matcher: &jj_lib::matchers::EverythingMatcher,
-            force_tracking_matcher: &jj_lib::matchers::NothingMatcher,
-            max_new_file_size: 1024 * 1024 * 100,
-        };
-        let (_tree, _stats) = locked_wc.snapshot(&snapshot_options).await?;
-        locked_wc.finish(repo.operation().id().clone()).await?;
-        workspace.repo_loader().load_at_head()?
+        snapshot_working_copy(workspace, &repo).await?
     } else {
         repo
     };
@@ -751,61 +755,17 @@ async fn run_describe(
     let short_id = &commit_id[..8.min(commit_id.len())];
     debug!(revision = %revision, commit_id = %short_id, "Resolved target revision");
 
-    // Get the commit's tree and its parent's tree
-    let current_tree = commit.tree();
-    let parent_tree = if !commit.parent_ids().is_empty() {
-        let parent_commit = repo.store().get_commit(&commit.parent_ids()[0])?;
-        parent_commit.tree()
-    } else {
-        MergedTree::resolved(repo.store().clone(), repo.store().empty_tree_id().clone())
-    };
-
-    if current_tree.tree_ids() == parent_tree.tree_ids() {
-        println!("No changes in revision {short_id}, nothing to describe");
-        return Ok(());
-    }
-
-    // Generate diff
-    let collapse_matcher = build_collapse_matcher(&CONFIG.diff.collapse_patterns);
-    let diff = get_tree_diff(
-        &repo,
-        &parent_tree,
-        &current_tree,
-        collapse_matcher.as_ref(),
-        CONFIG.diff.max_diff_lines,
-        CONFIG.diff.max_diff_bytes,
-    )
-    .await?;
-
-    if diff.trim().is_empty() {
-        println!("Empty diff for revision {short_id}, nothing to describe");
-        return Ok(());
-    }
-
-    let diff_lines = diff.lines().count();
-    let diff_bytes = diff.len();
-    let max_lines = CONFIG.diff.max_total_diff_lines;
-    let max_bytes = CONFIG.diff.max_total_diff_bytes;
-
-    if diff_lines > max_lines || diff_bytes > max_bytes {
-        bail!(
-            "Diff too large to generate description: {diff_lines} lines / {diff_bytes} bytes (limits: {max_lines} lines / {max_bytes} bytes). \
-            Consider using `jj describe` to set the message manually."
-        );
-    }
-
-    // Generate commit message
-    info!(language = %language, model = %model, "Generating description with Claude");
-    let generator = CommitMessageGenerator::new(language, model);
-    let description = match generator.generate(&diff) {
-        Some(msg) => msg,
+    let diff = match generate_diff(&repo, &commit).await? {
+        Some(diff) => diff,
         None => {
-            bail!("Failed to generate description");
+            println!("No changes in revision {short_id}, nothing to describe");
+            return Ok(());
         }
     };
+
+    let description = generate_message(&diff, language, model)?;
     debug!(description = %description, "Generated description");
 
-    // Rewrite the commit with the new description
     let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
     mut_repo
@@ -815,7 +775,7 @@ async fn run_describe(
     mut_repo.rebase_descendants()?;
     tx.commit(format!("describe revision {short_id} via ccc-jj"))?;
 
-    let file_changes = get_file_change_summary(&parent_tree, &current_tree).await;
+    let file_changes = get_file_change_summary(&get_parent_tree(&repo, &commit), &commit.tree()).await;
 
     let title = format!(
         "{}{} {}",
