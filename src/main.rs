@@ -93,6 +93,17 @@ enum Commands {
         #[arg(short, long, default_value = "English", env = "CCC_JJ_LANGUAGE")]
         language: String,
     },
+    /// Generate and set a commit description using AI (without creating a new commit)
+    #[command(alias = "d")]
+    Describe {
+        /// Revision to describe (default: @)
+        #[arg(short, long, default_value = "@")]
+        revision: String,
+
+        /// Language to use for commit messages
+        #[arg(short, long, default_value = "English", env = "CCC_JJ_LANGUAGE")]
+        language: String,
+    },
 }
 
 impl Default for Commands {
@@ -332,6 +343,9 @@ async fn main() -> Result<()> {
             run_bookmark(&workspace, &args.model, from, &to, prefix, dry_run).await
         }
         Commands::Commit { language } => run_commit(&workspace, &language, &args.model).await,
+        Commands::Describe { revision, language } => {
+            run_describe(&workspace, &language, &args.model, &revision).await
+        }
     }
 }
 
@@ -701,6 +715,117 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Resul
     info!("Creating commit");
     create_commit(workspace, &commit_message, current_tree, &file_changes).await?;
     info!("Commit created successfully");
+
+    Ok(())
+}
+
+async fn run_describe(
+    workspace: &Workspace,
+    language: &str,
+    model: &str,
+    revision: &str,
+) -> Result<()> {
+    let repo = workspace.repo_loader().load_at_head()?;
+    debug!("Loaded repository at head");
+
+    // For @, snapshot working copy first so the tree is up-to-date
+    let repo = if revision == "@" {
+        let mut locked_wc = workspace.working_copy().start_mutation()?;
+        let base_ignores = load_base_ignores(workspace.workspace_root())?;
+        let snapshot_options = SnapshotOptions {
+            base_ignores,
+            progress: None,
+            start_tracking_matcher: &jj_lib::matchers::EverythingMatcher,
+            force_tracking_matcher: &jj_lib::matchers::NothingMatcher,
+            max_new_file_size: 1024 * 1024 * 100,
+        };
+        let (_tree, _stats) = locked_wc.snapshot(&snapshot_options).await?;
+        locked_wc.finish(repo.operation().id().clone()).await?;
+        workspace.repo_loader().load_at_head()?
+    } else {
+        repo
+    };
+
+    let commit = resolve_single_commit(&repo, workspace, revision)?;
+    let commit_id = commit.id().hex();
+    let short_id = &commit_id[..8.min(commit_id.len())];
+    debug!(revision = %revision, commit_id = %short_id, "Resolved target revision");
+
+    // Get the commit's tree and its parent's tree
+    let current_tree = commit.tree();
+    let parent_tree = if !commit.parent_ids().is_empty() {
+        let parent_commit = repo.store().get_commit(&commit.parent_ids()[0])?;
+        parent_commit.tree()
+    } else {
+        MergedTree::resolved(repo.store().clone(), repo.store().empty_tree_id().clone())
+    };
+
+    if current_tree.tree_ids() == parent_tree.tree_ids() {
+        println!("No changes in revision {short_id}, nothing to describe");
+        return Ok(());
+    }
+
+    // Generate diff
+    let collapse_matcher = build_collapse_matcher(&CONFIG.diff.collapse_patterns);
+    let diff = get_tree_diff(
+        &repo,
+        &parent_tree,
+        &current_tree,
+        collapse_matcher.as_ref(),
+        CONFIG.diff.max_diff_lines,
+        CONFIG.diff.max_diff_bytes,
+    )
+    .await?;
+
+    if diff.trim().is_empty() {
+        println!("Empty diff for revision {short_id}, nothing to describe");
+        return Ok(());
+    }
+
+    let diff_lines = diff.lines().count();
+    let diff_bytes = diff.len();
+    let max_lines = CONFIG.diff.max_total_diff_lines;
+    let max_bytes = CONFIG.diff.max_total_diff_bytes;
+
+    if diff_lines > max_lines || diff_bytes > max_bytes {
+        bail!(
+            "Diff too large to generate description: {diff_lines} lines / {diff_bytes} bytes (limits: {max_lines} lines / {max_bytes} bytes). \
+            Consider using `jj describe` to set the message manually."
+        );
+    }
+
+    // Generate commit message
+    info!(language = %language, model = %model, "Generating description with Claude");
+    let generator = CommitMessageGenerator::new(language, model);
+    let description = match generator.generate(&diff) {
+        Some(msg) => msg,
+        None => {
+            bail!("Failed to generate description");
+        }
+    };
+    debug!(description = %description, "Generated description");
+
+    // Rewrite the commit with the new description
+    let mut tx = repo.start_transaction();
+    let mut_repo = tx.repo_mut();
+    mut_repo
+        .rewrite_commit(&commit)
+        .set_description(&description)
+        .write()?;
+    mut_repo.rebase_descendants()?;
+    tx.commit(format!("describe revision {short_id} via ccc-jj"))?;
+
+    let file_changes = get_file_change_summary(&parent_tree, &current_tree).await;
+
+    let title = format!(
+        "{}{} {}",
+        "Described change ".white().dimmed(),
+        short_id.blue().dimmed(),
+        if revision == "@" { "".to_string() } else { format!("({})", revision).white().dimmed().to_string() },
+    );
+
+    print!("{}", format_box_with_title(&title, &description, 72));
+    print_file_changes(&file_changes);
 
     Ok(())
 }
