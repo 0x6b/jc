@@ -90,7 +90,6 @@ Guidelines:
     - Prioritize: feat > fix > refactor > others
     - If multiple types, choose the most significant one
     - Start with a lower case letter
-    - The commit type and description are separate output fields. Do NOT include the type prefix in the title field.
 - Body: explain WHY the change was needed (motivation, context), not WHAT changed
     - Include body only if motivation/context isn't obvious from the title
     - Use bullet points for multiple changes or breaking changes

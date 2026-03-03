@@ -405,7 +405,7 @@ async fn run_bookmark(
 
     info!(model = %model, "Generating bookmark name with Claude");
     let generator = BookmarkGenerator::new(model);
-    let bookmark_name = match generator.generate(&commit_summaries) {
+    let bookmark_name = match generator.generate(&commit_summaries).await {
         Some(name) => name,
         None => bail!("Failed to generate bookmark name"),
     };
@@ -683,10 +683,10 @@ async fn generate_diff(repo: &ReadonlyRepo, commit: &Commit) -> Result<Option<St
 }
 
 /// Generate a commit message from a diff using Claude.
-fn generate_message(diff: &str, language: &str, model: &str) -> Result<String> {
+async fn generate_message(diff: &str, language: &str, model: &str) -> Result<String> {
     info!(language = %language, model = %model, "Generating commit message with Claude");
     let generator = CommitMessageGenerator::new(language, model);
-    match generator.generate(diff) {
+    match generator.generate(diff).await {
         Some(msg) => Ok(msg),
         None => bail!("Failed to generate commit message"),
     }
@@ -719,7 +719,7 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Resul
         }
     };
 
-    let commit_message = generate_message(&diff, language, model)?;
+    let commit_message = generate_message(&diff, language, model).await?;
     debug!(commit_message = %commit_message, "Generated commit message");
 
     let current_tree = wc_commit.tree();
@@ -757,7 +757,7 @@ async fn run_describe(
         }
     };
 
-    let description = generate_message(&diff, language, model)?;
+    let description = generate_message(&diff, language, model).await?;
     debug!(description = %description, "Generated description");
 
     let mut tx = repo.start_transaction();

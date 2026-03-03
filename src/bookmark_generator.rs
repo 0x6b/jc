@@ -12,8 +12,6 @@ static VALID_BOOKMARK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z][a-z0-9]*(-[a-z][a-z0-9]*){1,5}$").expect("Failed to compile bookmark regex")
 });
 
-const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"bookmark":{"type":"string","description":"Bookmark name: 2-6 lowercase words separated by hyphens, e.g. 'add-user-auth'"}},"required":["bookmark"]}"#;
-
 pub struct BookmarkGenerator {
     prompt_template: String,
     command: String,
@@ -31,9 +29,9 @@ impl BookmarkGenerator {
         }
     }
 
-    pub fn generate(&self, commit_summaries: &str) -> Option<String> {
+    pub async fn generate(&self, commit_summaries: &str) -> Option<String> {
         debug!(summaries_len = commit_summaries.len(), "Starting bookmark name generation");
-        self.try_generate(commit_summaries).and_then(|name| {
+        self.try_generate(commit_summaries).await.and_then(|name| {
             let name = name.trim().to_lowercase();
             if VALID_BOOKMARK_RE.is_match(&name) {
                 debug!(bookmark = %name, "Generated valid bookmark name");
@@ -45,7 +43,7 @@ impl BookmarkGenerator {
         })
     }
 
-    fn try_generate(&self, commit_summaries: &str) -> Option<String> {
+    async fn try_generate(&self, commit_summaries: &str) -> Option<String> {
         let prompt = self.prompt_template.replace("{commit_summaries}", commit_summaries);
         trace!(prompt_len = prompt.len(), "Prepared prompt for Claude");
 
@@ -53,18 +51,12 @@ impl BookmarkGenerator {
             command: &self.command,
             args: &self.args,
             model: &self.model,
-            json_schema: JSON_SCHEMA,
             prompt: &prompt,
             spinner_message: "Generating bookmark name with Claude...",
         };
 
-        let structured = invoke_claude(&request)?;
-
-        let bookmark = structured
-            .get("bookmark")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
+        let text = invoke_claude(&request).await?;
+        let bookmark = text.trim();
 
         if bookmark.is_empty() {
             warn!("Claude CLI returned empty bookmark");

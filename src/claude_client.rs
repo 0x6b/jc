@@ -1,11 +1,8 @@
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-    time::Duration,
-};
+use std::{process::Stdio, time::Duration};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::{Value, from_str};
+use tokio::{io::AsyncWriteExt, process::Command};
 use tracing::{debug, trace, warn};
 
 /// Configuration for Claude CLI invocation
@@ -13,16 +10,16 @@ pub struct ClaudeRequest<'a> {
     pub command: &'a str,
     pub args: &'a [String],
     pub model: &'a str,
-    pub json_schema: &'a str,
     pub prompt: &'a str,
     pub spinner_message: &'a str,
 }
 
-/// Invokes Claude CLI and returns the structured output JSON value.
+/// Invokes Claude CLI and returns the result text.
 ///
-/// Handles spinner display, subprocess spawning, and JSON parsing.
+/// Uses async I/O to write stdin and read stdout/stderr concurrently,
+/// avoiding pipe buffer deadlocks with large prompts.
 /// Returns `None` if the command fails or output cannot be parsed.
-pub fn invoke_claude(request: &ClaudeRequest<'_>) -> Option<Value> {
+pub async fn invoke_claude(request: &ClaudeRequest<'_>) -> Option<String> {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
@@ -41,25 +38,46 @@ pub fn invoke_claude(request: &ClaudeRequest<'_>) -> Option<Value> {
         "Executing Claude CLI via stdin"
     );
 
-    let result = Command::new(request.command)
+    let mut child = match Command::new(request.command)
         .env_remove("CLAUDECODE")
         .args(request.args)
         .arg("--model")
         .arg(request.model)
-        .arg("--json-schema")
-        .arg(request.json_schema)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .and_then(|mut child| {
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(request.prompt.as_bytes())?;
-            }
-            child.wait_with_output()
-        });
+    {
+        Ok(child) => child,
+        Err(e) => {
+            warn!(error = %e, "Failed to spawn Claude CLI");
+            spinner.finish_and_clear();
+            return None;
+        }
+    };
 
-    let result = match result {
+    // Write prompt to stdin in a separate task to avoid pipe buffer deadlock:
+    // if the prompt exceeds the OS pipe buffer (~64KB), write_all blocks while
+    // the child may simultaneously fill stdout/stderr buffers and block on write.
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    let prompt_bytes = request.prompt.as_bytes().to_vec();
+    let stdin_task = tokio::spawn(async move {
+        stdin.write_all(&prompt_bytes).await?;
+        stdin.shutdown().await?;
+        Ok::<_, std::io::Error>(())
+    });
+
+    // Concurrently read stdout/stderr and wait for exit
+    let output = child.wait_with_output().await;
+
+    // Check stdin write result
+    match stdin_task.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => warn!(error = %e, "Failed to write prompt to stdin"),
+        Err(e) => warn!(error = %e, "stdin write task panicked"),
+    }
+
+    let result = match output {
         Ok(output) => {
             debug!(
                 status = %output.status,
@@ -67,18 +85,21 @@ pub fn invoke_claude(request: &ClaudeRequest<'_>) -> Option<Value> {
                 stderr_len = output.stderr.len(),
                 "Claude CLI completed"
             );
+
+            let raw_output = String::from_utf8_lossy(&output.stdout);
+
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!(status = %output.status, stderr = %stderr, "Claude CLI failed");
-                None
-            } else {
-                let raw_output = String::from_utf8_lossy(&output.stdout);
-                trace!(raw_output = %raw_output, "Claude CLI raw output");
-                parse_structured_output(&raw_output)
+                if !stderr.trim().is_empty() {
+                    warn!(status = %output.status, stderr = %stderr, "Claude CLI failed");
+                }
             }
+
+            trace!(raw_output = %raw_output, "Claude CLI raw output");
+            parse_result_text(&raw_output)
         }
         Err(e) => {
-            warn!(error = %e, "Failed to execute Claude CLI");
+            warn!(error = %e, "Failed to wait for Claude CLI");
             None
         }
     };
@@ -87,22 +108,44 @@ pub fn invoke_claude(request: &ClaudeRequest<'_>) -> Option<Value> {
     result
 }
 
-/// Parse Claude CLI JSON output and extract the structured_output field.
-fn parse_structured_output(raw_output: &str) -> Option<Value> {
+/// Parse Claude CLI JSON output and extract the result text.
+///
+/// Handles both single-object and array (streaming) formats:
+/// - Object: `{"type": "result", "result": "text", ...}`
+/// - Array: `[..., {"type": "result", "result": "text", ...}]`
+///
+/// Checks `is_error` on the result event and returns `None` with a warning
+/// if the CLI reported an error (e.g., rate limit, auth failure).
+fn parse_result_text(raw_output: &str) -> Option<String> {
     match from_str::<Value>(raw_output) {
         Ok(json) => {
-            let structured = if let Some(arr) = json.as_array() {
+            let result_obj = if let Some(arr) = json.as_array() {
                 arr.iter()
                     .rfind(|obj| obj.get("type").and_then(|v| v.as_str()) == Some("result"))
-                    .and_then(|obj| obj.get("structured_output"))
             } else {
-                json.get("structured_output")
+                Some(&json)
             };
 
-            if let Some(structured) = structured {
-                Some(structured.clone())
+            let Some(result_obj) = result_obj else {
+                warn!("Claude CLI JSON missing 'result' event");
+                return None;
+            };
+
+            if result_obj.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+                let error_text = result_obj
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                warn!(error = %error_text, "Claude CLI returned an error");
+                return None;
+            }
+
+            let text = result_obj.get("result").and_then(|v| v.as_str());
+
+            if let Some(text) = text {
+                Some(text.to_string())
             } else {
-                warn!("Claude CLI JSON missing 'structured_output' field");
+                warn!("Claude CLI JSON missing 'result' text field");
                 None
             }
         }
