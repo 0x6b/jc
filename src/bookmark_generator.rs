@@ -4,7 +4,7 @@ use regex::Regex;
 use tracing::{debug, trace, warn};
 
 use crate::{
-    claude_client::{ClaudeRequest, invoke_claude},
+    codex_client::{CodexRequest, invoke_codex},
     config::CONFIG,
 };
 
@@ -45,25 +45,29 @@ impl BookmarkGenerator {
 
     async fn try_generate(&self, commit_summaries: &str) -> Option<String> {
         let prompt = self.prompt_template.replace("{commit_summaries}", commit_summaries);
-        trace!(prompt_len = prompt.len(), "Prepared prompt for Claude");
+        trace!(prompt_len = prompt.len(), "Prepared prompt for Codex");
 
-        let request = ClaudeRequest {
+        let model = self.model.trim();
+        let model =
+            if model.is_empty() || model.eq_ignore_ascii_case("auto") { None } else { Some(model) };
+
+        let request = CodexRequest {
             command: &self.command,
             args: &self.args,
-            model: &self.model,
+            model,
             prompt: &prompt,
-            spinner_message: "Generating bookmark name with Claude...",
+            spinner_message: "Generating bookmark name with Codex...",
         };
 
-        let text = invoke_claude(&request).await?;
+        let text = invoke_codex(&request).await?;
         let bookmark = text.trim();
 
         if bookmark.is_empty() {
-            warn!("Claude CLI returned empty bookmark");
+            warn!("Codex CLI returned empty bookmark");
             return None;
         }
 
-        trace!(bookmark = %bookmark, "Claude CLI output");
+        trace!(bookmark = %bookmark, "Codex CLI output");
         Some(bookmark.to_string())
     }
 }

@@ -1,5 +1,5 @@
 mod bookmark_generator;
-mod claude_client;
+mod codex_client;
 mod commit_message_generator;
 mod config;
 mod diff;
@@ -58,7 +58,7 @@ struct Args {
     path: Option<PathBuf>,
 
     /// Model to use for AI generation
-    #[arg(short, long, default_value = "haiku", env = "CCC_JJ_MODEL", global = true)]
+    #[arg(short, long, default_value = "auto", env = "CCC_JJ_MODEL", global = true)]
     model: String,
 
     #[command(subcommand)]
@@ -403,7 +403,7 @@ async fn run_bookmark(
     }
     debug!(commit_count = commit_summaries.lines().count(), "Found commits");
 
-    info!(model = %model, "Generating bookmark name with Claude");
+    info!(model = %model, "Generating bookmark name with Codex");
     let generator = BookmarkGenerator::new(model);
     let bookmark_name = match generator.generate(&commit_summaries).await {
         Some(name) => name,
@@ -682,9 +682,9 @@ async fn generate_diff(repo: &ReadonlyRepo, commit: &Commit) -> Result<Option<St
     Ok(Some(diff))
 }
 
-/// Generate a commit message from a diff using Claude.
+/// Generate a commit message from a diff using Codex.
 async fn generate_message(diff: &str, language: &str, model: &str) -> Result<String> {
-    info!(language = %language, model = %model, "Generating commit message with Claude");
+    info!(language = %language, model = %model, "Generating commit message with Codex");
     let generator = CommitMessageGenerator::new(language, model);
     match generator.generate(diff).await {
         Some(msg) => Ok(msg),

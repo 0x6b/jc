@@ -1,8 +1,8 @@
 [generator]
-# Claude CLI configuration for commit message generation
-command = "claude"
-# Claude CLI arguments - using headless mode with structured JSON output
-args = ["-p", "--output-format", "json", "--no-session-persistence"]
+# Codex CLI configuration for commit message generation
+command = "codex"
+# Codex CLI arguments - run non-interactively with JSON event output
+args = ["exec", "--json", "--skip-git-repo-check", "--ephemeral", "--color", "never"]
 # Fallback message if generation fails
 default_commit_message = "chore: update changes"
 
@@ -35,7 +35,7 @@ max_diff_lines = 2048
 # Catches edge cases like large SVGs or minified files with few lines
 max_diff_bytes = 65535
 
-# Total diff size limits - abort before sending to Claude if exceeded
+# Total diff size limits - abort before sending to Codex if exceeded
 # Prevents wasted API calls and cryptic failures on massive diffs
 max_total_diff_lines = 8192
 max_total_diff_bytes = 262144  # 256 KB

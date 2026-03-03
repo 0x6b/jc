@@ -4,7 +4,7 @@ use regex::Regex;
 use tracing::{debug, error, trace, warn};
 
 use crate::{
-    claude_client::{ClaudeRequest, invoke_claude},
+    codex_client::{CodexRequest, invoke_codex},
     config::CONFIG,
     text_formatter::format_text,
 };
@@ -14,7 +14,7 @@ static CONVENTIONAL_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Failed to compile conventional commit regex")
 });
 
-/// Generates commit messages using Claude CLI based on diff content
+/// Generates commit messages using Codex CLI based on diff content
 pub struct CommitMessageGenerator {
     prompt_template: String,
     command: String,
@@ -54,31 +54,35 @@ impl CommitMessageGenerator {
             .prompt_template
             .replace("{language}", &self.language)
             .replace("{diff_content}", diff_content);
-        trace!(prompt_len = prompt.len(), "Prepared prompt for Claude");
+        trace!(prompt_len = prompt.len(), "Prepared prompt for Codex");
 
-        let request = ClaudeRequest {
+        let model = self.model.trim();
+        let model =
+            if model.is_empty() || model.eq_ignore_ascii_case("auto") { None } else { Some(model) };
+
+        let request = CodexRequest {
             command: &self.command,
             args: &self.args,
-            model: &self.model,
+            model,
             prompt: &prompt,
-            spinner_message: "Generating commit message with Claude...",
+            spinner_message: "Generating commit message with Codex...",
         };
 
-        let text = invoke_claude(&request).await?;
+        let text = invoke_codex(&request).await?;
         let message = text.trim();
 
         if message.is_empty() {
-            warn!("Claude CLI returned empty message");
+            warn!("Codex CLI returned empty message");
             return None;
         }
 
-        trace!(message = %message, "Claude CLI output");
+        trace!(message = %message, "Codex CLI output");
         Some(message.to_string())
     }
 }
 
 impl Default for CommitMessageGenerator {
     fn default() -> Self {
-        Self::new("English", "haiku")
+        Self::new("English", "auto")
     }
 }
