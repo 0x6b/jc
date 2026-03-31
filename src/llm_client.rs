@@ -27,9 +27,18 @@ impl<'a> LlmRequest<'a> {
         spinner_message: &'a str,
     ) -> Self {
         let trimmed = model.trim();
-        let model =
-            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") { None } else { Some(trimmed) };
-        Self { command: &config.command, args: &config.args, model, prompt, spinner_message }
+        let model = if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+            None
+        } else {
+            Some(trimmed)
+        };
+        Self {
+            command: &config.command,
+            args: &config.args,
+            model,
+            prompt,
+            spinner_message,
+        }
     }
 }
 
