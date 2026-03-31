@@ -244,6 +244,7 @@ fn find_workspace(start_dir: &Path) -> Result<Workspace> {
         workspace_path: Some(workspace_root),
         command: None,
         hostname: hostname.as_str(),
+        environment: &std::env::vars().collect(),
     };
     let resolved_config = resolve(&config, &context)?;
 
@@ -264,7 +265,7 @@ async fn create_commit(
     tree: MergedTree,
     file_changes: &FileChangeSummary,
 ) -> Result<()> {
-    let repo = workspace.repo_loader().load_at_head()?;
+    let repo = workspace.repo_loader().load_at_head().await?;
 
     // Start transaction
     let mut tx = repo.start_transaction();
@@ -281,19 +282,21 @@ async fn create_commit(
         .rewrite_commit(&wc_commit)
         .set_tree(tree.clone())
         .set_description(commit_message)
-        .write()?;
+        .write()
+        .await?;
 
     // Rebase descendants (handles the rewrite)
-    mut_repo.rebase_descendants()?;
+    mut_repo.rebase_descendants().await?;
 
     // Create a new empty working copy commit on top
     let new_wc_commit = mut_repo
         .new_commit(vec![commit_with_description.id().clone()], tree)
-        .write()?;
+        .write()
+        .await?;
 
     mut_repo.set_wc_commit(workspace.workspace_name().to_owned(), new_wc_commit.id().clone())?;
 
-    let new_repo = tx.commit("auto-commit via jc")?;
+    let new_repo = tx.commit("auto-commit via jc").await?;
 
     // Finish the working copy with the new state
     let locked_wc = workspace.working_copy().start_mutation()?;
