@@ -5,6 +5,8 @@ use serde_json::{Value, from_str};
 use tokio::{io::AsyncWriteExt, process::Command, spawn};
 use tracing::{debug, trace, warn};
 
+use crate::config::GeneratorConfig;
+
 /// Configuration for LLM CLI invocation
 pub struct LlmRequest<'a> {
     pub command: &'a str,
@@ -12,6 +14,23 @@ pub struct LlmRequest<'a> {
     pub model: Option<&'a str>,
     pub prompt: &'a str,
     pub spinner_message: &'a str,
+}
+
+impl<'a> LlmRequest<'a> {
+    /// Build a request from the generator config, a resolved model string, prompt, and spinner
+    /// message. The model is mapped to `None` when it equals "auto" or is empty, so that no
+    /// `--model` flag is passed to the CLI (letting it use its own default).
+    pub fn new(
+        config: &'a GeneratorConfig,
+        model: &'a str,
+        prompt: &'a str,
+        spinner_message: &'a str,
+    ) -> Self {
+        let trimmed = model.trim();
+        let model =
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") { None } else { Some(trimmed) };
+        Self { command: &config.command, args: &config.args, model, prompt, spinner_message }
+    }
 }
 
 /// Invokes an LLM CLI and returns the result text.

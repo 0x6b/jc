@@ -12,21 +12,13 @@ static VALID_BOOKMARK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z][a-z0-9]*(-[a-z][a-z0-9]*){1,5}$").expect("Failed to compile bookmark regex")
 });
 
-pub struct BookmarkGenerator {
-    prompt_template: String,
-    command: String,
-    args: Vec<String>,
-    model: String,
+pub struct BookmarkGenerator<'a> {
+    model: &'a str,
 }
 
-impl BookmarkGenerator {
-    pub fn new(model: &str) -> Self {
-        Self {
-            prompt_template: CONFIG.bookmark.prompt_template.clone(),
-            command: CONFIG.generator.command.clone(),
-            args: CONFIG.generator.args.clone(),
-            model: model.to_string(),
-        }
+impl<'a> BookmarkGenerator<'a> {
+    pub fn new(model: &'a str) -> Self {
+        Self { model }
     }
 
     pub async fn generate(&self, commit_summaries: &str) -> Option<String> {
@@ -44,20 +36,14 @@ impl BookmarkGenerator {
     }
 
     async fn try_generate(&self, commit_summaries: &str) -> Option<String> {
-        let prompt = self.prompt_template.replace("{commit_summaries}", commit_summaries);
+        let prompt = CONFIG
+            .bookmark
+            .prompt_template
+            .replace("{commit_summaries}", commit_summaries);
         trace!(prompt_len = prompt.len(), "Prepared prompt");
 
-        let model = self.model.trim();
-        let model =
-            if model.is_empty() || model.eq_ignore_ascii_case("auto") { None } else { Some(model) };
-
-        let request = LlmRequest {
-            command: &self.command,
-            args: &self.args,
-            model,
-            prompt: &prompt,
-            spinner_message: "Generating bookmark name...",
-        };
+        let request =
+            LlmRequest::new(&CONFIG.generator, self.model, &prompt, "Generating bookmark name...");
 
         let text = invoke(&request).await?;
         let bookmark = text.trim();
