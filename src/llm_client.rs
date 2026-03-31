@@ -5,8 +5,8 @@ use serde_json::{Value, from_str};
 use tokio::{io::AsyncWriteExt, process::Command};
 use tracing::{debug, trace, warn};
 
-/// Configuration for Codex CLI invocation
-pub struct CodexRequest<'a> {
+/// Configuration for LLM CLI invocation
+pub struct LlmRequest<'a> {
     pub command: &'a str,
     pub args: &'a [String],
     pub model: Option<&'a str>,
@@ -14,12 +14,16 @@ pub struct CodexRequest<'a> {
     pub spinner_message: &'a str,
 }
 
-/// Invokes Codex CLI and returns the result text.
+/// Invokes an LLM CLI and returns the result text.
+///
+/// Supports both Claude CLI and Codex CLI output formats:
+/// - Claude JSON: `{"type": "result", "result": "text", ...}` or array of events
+/// - Codex JSONL: `{"type":"item.completed","item":{"type":"agent_message","text":"..."}}`
+/// - Plain text fallback
 ///
 /// Uses async I/O to write stdin and read stdout/stderr concurrently,
 /// avoiding pipe buffer deadlocks with large prompts.
-/// Returns `None` if the command fails or output cannot be parsed.
-pub async fn invoke_codex(request: &CodexRequest<'_>) -> Option<String> {
+pub async fn invoke(request: &LlmRequest<'_>) -> Option<String> {
     let spinner = ProgressBar::new_spinner();
     spinner.set_style(
         ProgressStyle::default_spinner()
@@ -35,11 +39,12 @@ pub async fn invoke_codex(request: &CodexRequest<'_>) -> Option<String> {
         args = ?request.args,
         model = request.model.unwrap_or("auto"),
         prompt_len = request.prompt.len(),
-        "Executing Codex CLI via stdin"
+        "Executing LLM CLI via stdin"
     );
 
     let mut command = Command::new(request.command);
     command
+        .env_remove("CLAUDECODE")
         .args(request.args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -51,7 +56,7 @@ pub async fn invoke_codex(request: &CodexRequest<'_>) -> Option<String> {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
-            warn!(error = %e, "Failed to spawn Codex CLI");
+            warn!(error = %e, "Failed to spawn LLM CLI");
             spinner.finish_and_clear();
             return None;
         }
@@ -84,7 +89,7 @@ pub async fn invoke_codex(request: &CodexRequest<'_>) -> Option<String> {
                 status = %output.status,
                 stdout_len = output.stdout.len(),
                 stderr_len = output.stderr.len(),
-                "Codex CLI completed"
+                "LLM CLI completed"
             );
 
             let raw_output = String::from_utf8_lossy(&output.stdout);
@@ -92,17 +97,17 @@ pub async fn invoke_codex(request: &CodexRequest<'_>) -> Option<String> {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if !output.status.success() {
                 if !stderr.trim().is_empty() {
-                    warn!(status = %output.status, stderr = %stderr, "Codex CLI failed");
+                    warn!(status = %output.status, stderr = %stderr, "LLM CLI failed");
                 }
             } else if !stderr.trim().is_empty() {
-                trace!(stderr = %stderr, "Codex CLI stderr");
+                trace!(stderr = %stderr, "LLM CLI stderr");
             }
 
-            trace!(raw_output = %raw_output, "Codex CLI raw output");
+            trace!(raw_output = %raw_output, "LLM CLI raw output");
             parse_result_text(&raw_output)
         }
         Err(e) => {
-            warn!(error = %e, "Failed to wait for Codex CLI");
+            warn!(error = %e, "Failed to wait for LLM CLI");
             None
         }
     };
@@ -111,17 +116,20 @@ pub async fn invoke_codex(request: &CodexRequest<'_>) -> Option<String> {
     result
 }
 
-/// Parse Codex CLI output and extract the result text.
+/// Parse LLM CLI output and extract the result text.
 ///
-/// Supports:
-/// - Claude JSON output (for backward compatibility)
-/// - Object: `{"type": "result", "result": "text", ...}`
-/// - Array: `[..., {"type": "result", "result": "text", ...}]`
+/// Supports multiple output formats:
+///
+/// - Claude/Codex JSON result event:
+///   - Object: `{"type": "result", "result": "text", ...}`
+///   - Array: `[..., {"type": "result", "result": "text", ...}]`
 ///
 /// - Codex JSONL events:
 ///   `{"type":"item.completed","item":{"type":"agent_message","text":"..."}}`
+///
 /// - Plain text output (best-effort fallback)
 fn parse_result_text(raw_output: &str) -> Option<String> {
+    // Try parsing as a single JSON value (object or array)
     if let Ok(json) = from_str::<Value>(raw_output) {
         let result_obj = if let Some(arr) = json.as_array() {
             arr.iter()
@@ -138,7 +146,7 @@ fn parse_result_text(raw_output: &str) -> Option<String> {
                     .get("result")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown error");
-                warn!(error = %error_text, "Provider CLI returned an error");
+                warn!(error = %error_text, "LLM CLI returned an error");
                 return None;
             }
 
@@ -146,11 +154,12 @@ fn parse_result_text(raw_output: &str) -> Option<String> {
                 return Some(text.to_string());
             }
 
-            warn!("Provider JSON missing 'result' text field");
+            warn!("LLM JSON missing 'result' text field");
             return None;
         }
     }
 
+    // Try parsing as JSONL (Codex event stream)
     let mut last_agent_message: Option<String> = None;
     let mut last_error: Option<String> = None;
     for line in raw_output.lines() {
@@ -173,7 +182,7 @@ fn parse_result_text(raw_output: &str) -> Option<String> {
                         last_agent_message = Some(text.to_string());
                     }
                 } else if item_type == Some("reasoning") {
-                    trace!(reasoning = ?text, "Codex reasoning item");
+                    trace!(reasoning = ?text, "LLM reasoning item");
                 }
             }
             Some("error") => {
@@ -198,10 +207,11 @@ fn parse_result_text(raw_output: &str) -> Option<String> {
         return Some(message);
     }
     if let Some(error) = last_error {
-        warn!(error = %error, "Codex CLI returned an error");
+        warn!(error = %error, "LLM CLI returned an error");
         return None;
     }
 
+    // Fallback: treat as plain text, filtering out noise
     let plain_text = raw_output
         .lines()
         .map(str::trim)
@@ -214,7 +224,7 @@ fn parse_result_text(raw_output: &str) -> Option<String> {
     if !plain_text.is_empty() {
         Some(plain_text)
     } else {
-        warn!("Codex CLI output did not contain a parseable result");
+        warn!("LLM CLI output did not contain a parseable result");
         None
     }
 }

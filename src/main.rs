@@ -1,8 +1,8 @@
 mod bookmark_generator;
-mod codex_client;
 mod commit_message_generator;
 mod config;
 mod diff;
+mod llm_client;
 mod text_formatter;
 
 use std::{
@@ -19,7 +19,7 @@ use chrono::Local;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use commit_message_generator::CommitMessageGenerator;
-use config::CONFIG;
+use config::{Backend, CONFIG};
 use console::strip_ansi_codes;
 use diff::{FileChangeSummary, build_collapse_matcher, get_file_change_summary, get_tree_diff};
 use dirs::{config_dir, home_dir};
@@ -57,7 +57,11 @@ struct Args {
     #[arg(short, long, global = true)]
     path: Option<PathBuf>,
 
-    /// Model to use for AI generation
+    /// LLM backend to use
+    #[arg(short, long, default_value = "codex", env = "CCC_JJ_BACKEND", global = true)]
+    backend: Backend,
+
+    /// Model to use for AI generation (defaults to backend's default)
     #[arg(short, long, default_value = "auto", env = "CCC_JJ_MODEL", global = true)]
     model: String,
 
@@ -289,7 +293,7 @@ async fn create_commit(
 
     mut_repo.set_wc_commit(workspace.workspace_name().to_owned(), new_wc_commit.id().clone())?;
 
-    let new_repo = tx.commit("auto-commit via ccc-jj")?;
+    let new_repo = tx.commit("auto-commit via jc")?;
 
     // Finish the working copy with the new state
     let locked_wc = workspace.working_copy().start_mutation()?;
@@ -322,7 +326,15 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    config::set_backend(args.backend);
     debug!(?args, "Parsed arguments");
+
+    // Resolve model: "auto" falls back to the backend's configured default
+    let model = if args.model.eq_ignore_ascii_case("auto") {
+        CONFIG.generator.default_model.clone()
+    } else {
+        args.model
+    };
 
     // Determine workspace path
     let workspace_path = match args.path {
@@ -337,11 +349,11 @@ async fn main() -> Result<()> {
 
     match args.command.unwrap_or_default() {
         Commands::Bookmark { from, to, prefix, dry_run } => {
-            run_bookmark(&workspace, &args.model, from, &to, prefix, dry_run).await
+            run_bookmark(&workspace, &model, from, &to, prefix, dry_run).await
         }
-        Commands::Commit { language } => run_commit(&workspace, &language, &args.model).await,
+        Commands::Commit { language } => run_commit(&workspace, &language, &model).await,
         Commands::Describe { revision, language } => {
-            run_describe(&workspace, &language, &args.model, &revision).await
+            run_describe(&workspace, &language, &model, &revision).await
         }
     }
 }
@@ -403,7 +415,7 @@ async fn run_bookmark(
     }
     debug!(commit_count = commit_summaries.lines().count(), "Found commits");
 
-    info!(model = %model, "Generating bookmark name with Codex");
+    info!(model = %model, backend = %config::backend(), "Generating bookmark name");
     let generator = BookmarkGenerator::new(model);
     let bookmark_name = match generator.generate(&commit_summaries).await {
         Some(name) => name,
@@ -608,7 +620,7 @@ fn set_bookmark(repo: &Arc<ReadonlyRepo>, name: &str, commit: &Commit) -> Result
     }
 
     let action = if existed { "move" } else { "create" };
-    tx.commit(format!("{action} bookmark '{name}' via ccc-jj"))?;
+    tx.commit(format!("{action} bookmark '{name}' via jc"))?;
     Ok(existed)
 }
 
@@ -682,9 +694,9 @@ async fn generate_diff(repo: &ReadonlyRepo, commit: &Commit) -> Result<Option<St
     Ok(Some(diff))
 }
 
-/// Generate a commit message from a diff using Codex.
+/// Generate a commit message from a diff using the configured LLM backend.
 async fn generate_message(diff: &str, language: &str, model: &str) -> Result<String> {
-    info!(language = %language, model = %model, "Generating commit message with Codex");
+    info!(language = %language, model = %model, backend = %config::backend(), "Generating commit message");
     let generator = CommitMessageGenerator::new(language, model);
     match generator.generate(diff).await {
         Some(msg) => Ok(msg),
@@ -767,7 +779,7 @@ async fn run_describe(
         .set_description(&description)
         .write()?;
     mut_repo.rebase_descendants()?;
-    tx.commit(format!("describe revision {short_id} via ccc-jj"))?;
+    tx.commit(format!("describe revision {short_id} via jc"))?;
 
     let file_changes =
         get_file_change_summary(&get_parent_tree(&repo, &commit), &commit.tree()).await;

@@ -1,0 +1,83 @@
+[generator]
+command = "claude"
+args = ["-p", "--output-format", "json", "--no-session-persistence"]
+default_model = "opus"
+default_commit_message = "chore: update changes"
+
+[bookmark]
+prompt_template = """
+Generate a short, descriptive bookmark (branch) name for the following commits.
+
+Rules:
+- Use 2-6 lowercase words separated by hyphens (e.g., "add-user-auth", "fix-login-redirect")
+- Each word segment MUST start with a letter, NOT a digit (e.g., "v2-support" not "2-support")
+- Describe WHAT changed, not version numbers (e.g., "update-woff2-converter" not "release-v-zero-eleven")
+- Focus on the single most significant change - do NOT try to cover all changes
+- Be specific but concise
+- Do NOT use dates, ticket numbers, version numbers, or generic names like "update-code"
+- Do NOT use prefixes like "feature/", "fix/", etc.
+
+Commits:
+{commit_summaries}
+
+OUTPUT ONLY THE BOOKMARK NAME. NO EXPLANATIONS.
+"""
+
+[diff]
+max_diff_lines = 2048
+max_diff_bytes = 65535
+max_total_diff_lines = 8192
+max_total_diff_bytes = 262144  # 256 KB
+collapse_patterns = [
+  "*.lock",
+  "package-lock.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "composer.lock",
+  "Gemfile.lock",
+  "poetry.lock",
+  "Pipfile.lock",
+  "flake.lock",
+  "*.min.js",
+  "*.min.css",
+  "*.bundle.js",
+  "*.chunk.js",
+  "*.generated.*",
+  "*.pb.go",
+  "*.pb.rs",
+  "*_generated.rs",
+  "vendor/**",
+  "node_modules/**",
+  "third_party/**",
+]
+
+[prompt]
+template = """
+Generate a Conventional Commit message in {language} for the following diff.
+
+Conventional Commits Format:
+<type>: <description>
+
+[optional body]
+
+[optional footer(s)]
+
+Types: feat, fix, refactor, docs, test, chore, style, perf, build, ci
+
+Guidelines:
+- Title: 50 characters max, imperative mood ("add feature" not "added feature")
+    - Do NOT include scope or component in parentheses
+    - Prioritize: feat > fix > refactor > others
+    - If multiple types, choose the most significant one
+    - Start with a lower case letter
+- Body: explain WHY the change was needed (motivation, context), not WHAT changed
+    - Include body only if motivation/context isn't obvious from the title
+    - Use bullet points for multiple changes or breaking changes
+    - For breaking changes, explain migration path in footer with "BREAKING CHANGE:" prefix
+
+OUTPUT ONLY THE COMMIT MESSAGE. NO EXPLANATIONS, NO COMMENTARY, NO MARKDOWN CODE BLOCKS.
+
+Diff:
+
+{diff_content}
+"""

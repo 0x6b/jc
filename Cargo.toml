@@ -1,12 +1,8 @@
 [package]
-name = "ccc-jj"
+name = "jc"
 version = "0.11.0"
 edition = "2024"
-description = "Auto-commit changes in a jj workspace using Codex for commit messages"
-
-[[bin]]
-name = "jc"
-path = "src/main.rs"
+description = "Auto-commit changes in a jj workspace using LLM-generated commit messages"
 
 [dependencies]
 jj-lib = { git = "https://github.com/jj-vcs/jj.git", tag = "v0.37.0" }

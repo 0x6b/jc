@@ -1,14 +1,10 @@
 [generator]
-# Codex CLI configuration for commit message generation
 command = "codex"
-# Codex CLI arguments - run non-interactively with JSON event output
 args = ["exec", "--json", "--skip-git-repo-check", "--ephemeral", "--color", "never"]
-# Fallback message if generation fails
+default_model = "auto"
 default_commit_message = "chore: update changes"
 
 [bookmark]
-# Prompt template for generating bookmark names from commit summaries
-# Variables: {commit_summaries}
 prompt_template = """
 Generate a short, descriptive bookmark (branch) name for the following commits.
 
@@ -28,22 +24,11 @@ OUTPUT ONLY THE BOOKMARK NAME. NO EXPLANATIONS.
 """
 
 [diff]
-# Files with more changed lines than this threshold are collapsed to a summary
-# Helps avoid exceeding LLM context limits with large file changes
 max_diff_lines = 2048
-# Files with diff larger than this byte size are collapsed to a summary
-# Catches edge cases like large SVGs or minified files with few lines
 max_diff_bytes = 65535
-
-# Total diff size limits - abort before sending to Codex if exceeded
-# Prevents wasted API calls and cryptic failures on massive diffs
 max_total_diff_lines = 8192
 max_total_diff_bytes = 262144  # 256 KB
-
-# Files matching these patterns show summary only (not full diff)
-# Useful for large generated/vendored files that add noise
 collapse_patterns = [
-  # Lock files
   "*.lock",
   "package-lock.json",
   "yarn.lock",
@@ -53,25 +38,20 @@ collapse_patterns = [
   "poetry.lock",
   "Pipfile.lock",
   "flake.lock",
-  # Minified/bundled
   "*.min.js",
   "*.min.css",
   "*.bundle.js",
   "*.chunk.js",
-  # Generated code
   "*.generated.*",
   "*.pb.go",
   "*.pb.rs",
   "*_generated.rs",
-  # Vendored
   "vendor/**",
   "node_modules/**",
   "third_party/**",
 ]
 
 [prompt]
-# A prompt template for generating commit messages
-# Variables to be replaced at run time: {language}, {diff_content}
 template = """
 Generate a Conventional Commit message in {language} for the following diff.
 

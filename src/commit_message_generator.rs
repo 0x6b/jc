@@ -4,8 +4,8 @@ use regex::Regex;
 use tracing::{debug, error, trace, warn};
 
 use crate::{
-    codex_client::{CodexRequest, invoke_codex},
     config::CONFIG,
+    llm_client::{LlmRequest, invoke},
     text_formatter::format_text,
 };
 
@@ -14,7 +14,7 @@ static CONVENTIONAL_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("Failed to compile conventional commit regex")
 });
 
-/// Generates commit messages using Codex CLI based on diff content
+/// Generates commit messages using an LLM CLI based on diff content
 pub struct CommitMessageGenerator {
     prompt_template: String,
     command: String,
@@ -54,29 +54,29 @@ impl CommitMessageGenerator {
             .prompt_template
             .replace("{language}", &self.language)
             .replace("{diff_content}", diff_content);
-        trace!(prompt_len = prompt.len(), "Prepared prompt for Codex");
+        trace!(prompt_len = prompt.len(), "Prepared prompt");
 
         let model = self.model.trim();
         let model =
             if model.is_empty() || model.eq_ignore_ascii_case("auto") { None } else { Some(model) };
 
-        let request = CodexRequest {
+        let request = LlmRequest {
             command: &self.command,
             args: &self.args,
             model,
             prompt: &prompt,
-            spinner_message: "Generating commit message with Codex...",
+            spinner_message: "Generating commit message...",
         };
 
-        let text = invoke_codex(&request).await?;
+        let text = invoke(&request).await?;
         let message = text.trim();
 
         if message.is_empty() {
-            warn!("Codex CLI returned empty message");
+            warn!("LLM CLI returned empty message");
             return None;
         }
 
-        trace!(message = %message, "Codex CLI output");
+        trace!(message = %message, "LLM CLI output");
         Some(message.to_string())
     }
 }

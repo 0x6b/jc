@@ -4,8 +4,8 @@ use regex::Regex;
 use tracing::{debug, trace, warn};
 
 use crate::{
-    codex_client::{CodexRequest, invoke_codex},
     config::CONFIG,
+    llm_client::{LlmRequest, invoke},
 };
 
 static VALID_BOOKMARK_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -45,29 +45,29 @@ impl BookmarkGenerator {
 
     async fn try_generate(&self, commit_summaries: &str) -> Option<String> {
         let prompt = self.prompt_template.replace("{commit_summaries}", commit_summaries);
-        trace!(prompt_len = prompt.len(), "Prepared prompt for Codex");
+        trace!(prompt_len = prompt.len(), "Prepared prompt");
 
         let model = self.model.trim();
         let model =
             if model.is_empty() || model.eq_ignore_ascii_case("auto") { None } else { Some(model) };
 
-        let request = CodexRequest {
+        let request = LlmRequest {
             command: &self.command,
             args: &self.args,
             model,
             prompt: &prompt,
-            spinner_message: "Generating bookmark name with Codex...",
+            spinner_message: "Generating bookmark name...",
         };
 
-        let text = invoke_codex(&request).await?;
+        let text = invoke(&request).await?;
         let bookmark = text.trim();
 
         if bookmark.is_empty() {
-            warn!("Codex CLI returned empty bookmark");
+            warn!("LLM CLI returned empty bookmark");
             return None;
         }
 
-        trace!(bookmark = %bookmark, "Codex CLI output");
+        trace!(bookmark = %bookmark, "LLM CLI output");
         Some(bookmark.to_string())
     }
 }
