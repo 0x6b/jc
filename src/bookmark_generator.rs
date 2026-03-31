@@ -42,8 +42,8 @@ impl<'a> BookmarkGenerator<'a> {
             .replace("{commit_summaries}", commit_summaries);
         trace!(prompt_len = prompt.len(), "Prepared prompt");
 
-        let request =
-            LlmRequest::new(&CONFIG.generator, self.model, &prompt, "Generating bookmark name...");
+        let spinner = format!("Generating bookmark name with {}...", crate::config::backend());
+        let request = LlmRequest::new(&CONFIG.generator, self.model, &prompt, &spinner);
 
         let text = invoke(&request).await?;
         let bookmark = text.trim();

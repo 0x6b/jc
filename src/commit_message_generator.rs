@@ -48,8 +48,8 @@ impl<'a> CommitMessageGenerator<'a> {
             .replace("{diff_content}", diff_content);
         trace!(prompt_len = prompt.len(), "Prepared prompt");
 
-        let request =
-            LlmRequest::new(&CONFIG.generator, self.model, &prompt, "Generating commit message...");
+        let spinner = format!("Generating commit message with {}...", crate::config::backend());
+        let request = LlmRequest::new(&CONFIG.generator, self.model, &prompt, &spinner);
 
         let text = invoke(&request).await?;
         let message = text.trim();
