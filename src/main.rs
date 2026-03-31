@@ -369,7 +369,7 @@ async fn run_bookmark(
     prefix: Option<String>,
     dry_run: bool,
 ) -> Result<()> {
-    let repo = workspace.repo_loader().load_at_head()?;
+    let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
 
     let from_rev = match from {
@@ -397,7 +397,7 @@ async fn run_bookmark(
             return Ok(());
         }
 
-        let was_moved = set_bookmark(&repo, &final_name, &target_commit)?;
+        let was_moved = set_bookmark(&repo, &final_name, &target_commit).await?;
         let action = if was_moved { "Moved bookmark" } else { "Created bookmark" };
         println!(
             "{} {} {} {}",
@@ -435,7 +435,7 @@ async fn run_bookmark(
         return Ok(());
     }
 
-    set_bookmark(&repo, &final_name, &target_commit)?;
+    set_bookmark(&repo, &final_name, &target_commit).await?;
     println!(
         "{} {} {} {}",
         "Created bookmark".green(),
@@ -534,12 +534,14 @@ fn evaluate_revset(
         path_converter: &path_converter,
         workspace_name: workspace.workspace_name(),
     };
+    let fileset_aliases_map = AliasesMap::new();
     let context = RevsetParseContext {
         aliases_map: &aliases_map,
         local_variables: HashMap::new(),
         user_email: settings.user_email(),
         date_pattern_context: DatePatternContext::Local(Local::now()),
         default_ignored_remote: None,
+        fileset_aliases_map: &fileset_aliases_map,
         use_glob_by_default: false,
         extensions: &extensions,
         workspace: Some(workspace_ctx),
@@ -588,7 +590,7 @@ fn resolve_single_commit(
 
 /// Set bookmark to point to commit. Returns true if bookmark already existed (moved), false if
 /// created. Also exports the bookmark to git refs.
-fn set_bookmark(repo: &Arc<ReadonlyRepo>, name: &str, commit: &Commit) -> Result<bool> {
+async fn set_bookmark(repo: &Arc<ReadonlyRepo>, name: &str, commit: &Commit) -> Result<bool> {
     let ref_name = RefName::new(name);
     let existed = repo.view().get_local_bookmark(ref_name).is_present();
 
@@ -623,7 +625,7 @@ fn set_bookmark(repo: &Arc<ReadonlyRepo>, name: &str, commit: &Commit) -> Result
     }
 
     let action = if existed { "move" } else { "create" };
-    tx.commit(format!("{action} bookmark '{name}' via jc"))?;
+    tx.commit(format!("{action} bookmark '{name}' via jc")).await?;
     Ok(existed)
 }
 
@@ -645,7 +647,7 @@ async fn snapshot_working_copy(
     let (_tree, _stats) = locked_wc.snapshot(&snapshot_options).await?;
     debug!("Snapshot complete");
     locked_wc.finish(repo.operation().id().clone()).await?;
-    workspace.repo_loader().load_at_head().map_err(Into::into)
+    workspace.repo_loader().load_at_head().await.map_err(Into::into)
 }
 
 /// Get parent tree for a commit.
@@ -708,7 +710,7 @@ async fn generate_message(diff: &str, language: &str, model: &str) -> Result<Str
 }
 
 async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Result<()> {
-    let repo = workspace.repo_loader().load_at_head()?;
+    let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
 
     let wc_commit_id = repo
@@ -754,7 +756,7 @@ async fn run_describe(
     model: &str,
     revision: &str,
 ) -> Result<()> {
-    let repo = workspace.repo_loader().load_at_head()?;
+    let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
 
     let repo = if revision == "@" { snapshot_working_copy(workspace, &repo).await? } else { repo };
@@ -780,9 +782,10 @@ async fn run_describe(
     mut_repo
         .rewrite_commit(&commit)
         .set_description(&description)
-        .write()?;
-    mut_repo.rebase_descendants()?;
-    tx.commit(format!("describe revision {short_id} via jc"))?;
+        .write()
+        .await?;
+    mut_repo.rebase_descendants().await?;
+    tx.commit(format!("describe revision {short_id} via jc")).await?;
 
     let file_changes =
         get_file_change_summary(&get_parent_tree(&repo, &commit), &commit.tree()).await;
