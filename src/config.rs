@@ -1,4 +1,7 @@
-use std::sync::{LazyLock, OnceLock};
+use std::{
+    fmt::{Display, Formatter, Result},
+    sync::{LazyLock, OnceLock},
+};
 
 use clap::ValueEnum;
 use serde::Deserialize;
@@ -10,8 +13,8 @@ pub enum Backend {
     Codex,
 }
 
-impl std::fmt::Display for Backend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for Backend {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
         match self {
             Backend::Claude => write!(f, "Claude"),
             Backend::Codex => write!(f, "Codex"),

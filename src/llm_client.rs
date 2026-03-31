@@ -1,8 +1,8 @@
-use std::{process::Stdio, time::Duration};
+use std::{io::Error, process::Stdio, time::Duration};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::{Value, from_str};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{io::AsyncWriteExt, process::Command, spawn};
 use tracing::{debug, trace, warn};
 
 /// Configuration for LLM CLI invocation
@@ -67,10 +67,10 @@ pub async fn invoke(request: &LlmRequest<'_>) -> Option<String> {
     // the child may simultaneously fill stdout/stderr buffers and block on write.
     let mut stdin = child.stdin.take().expect("stdin was piped");
     let prompt_bytes = request.prompt.as_bytes().to_vec();
-    let stdin_task = tokio::spawn(async move {
+    let stdin_task = spawn(async move {
         stdin.write_all(&prompt_bytes).await?;
         stdin.shutdown().await?;
-        Ok::<_, std::io::Error>(())
+        Ok::<_, Error>(())
     });
 
     // Concurrently read stdout/stderr and wait for exit
@@ -124,8 +124,7 @@ pub async fn invoke(request: &LlmRequest<'_>) -> Option<String> {
 ///   - Object: `{"type": "result", "result": "text", ...}`
 ///   - Array: `[..., {"type": "result", "result": "text", ...}]`
 ///
-/// - Codex JSONL events:
-///   `{"type":"item.completed","item":{"type":"agent_message","text":"..."}}`
+/// - Codex JSONL events: `{"type":"item.completed","item":{"type":"agent_message","text":"..."}}`
 ///
 /// - Plain text output (best-effort fallback)
 fn parse_result_text(raw_output: &str) -> Option<String> {

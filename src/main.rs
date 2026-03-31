@@ -19,7 +19,7 @@ use chrono::Local;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use commit_message_generator::CommitMessageGenerator;
-use config::{Backend, CONFIG};
+use config::{Backend, CONFIG, set_backend};
 use console::strip_ansi_codes;
 use diff::{FileChangeSummary, build_collapse_matcher, get_file_change_summary, get_tree_diff};
 use dirs::{config_dir, home_dir};
@@ -326,7 +326,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    config::set_backend(args.backend);
+    set_backend(args.backend);
     debug!(?args, "Parsed arguments");
 
     // Resolve model: "auto" falls back to the backend's configured default
