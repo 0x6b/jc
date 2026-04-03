@@ -34,6 +34,7 @@ use jj_lib::{
     dsl_util::AliasesMap,
     git::{GitImportOptions, export_refs, import_refs},
     gitignore::GitIgnoreFile,
+    id_prefix::IdPrefixContext,
     merged_tree::MergedTree,
     object_id::ObjectId,
     op_store::RefTarget,
@@ -41,8 +42,8 @@ use jj_lib::{
     repo::{ReadonlyRepo, Repo, StoreFactories},
     repo_path::RepoPathUiConverter::Fs,
     revset::{
-        RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
-        RevsetWorkspaceContext, SymbolResolver, parse,
+        RevsetAliasesMap, RevsetDiagnostics, RevsetExpression, RevsetExtensions,
+        RevsetParseContext, RevsetWorkspaceContext, SymbolResolver, parse,
     },
     settings::UserSettings,
     time_util::DatePatternContext,
@@ -527,7 +528,7 @@ fn evaluate_revset(
     revset_str: &str,
 ) -> Result<Vec<CommitId>> {
     let settings = repo.settings();
-    let extensions = RevsetExtensions::new();
+    let extensions = Arc::new(RevsetExtensions::new());
     let aliases_map: RevsetAliasesMap = AliasesMap::new();
     let path_converter = Fs {
         cwd: workspace.workspace_root().to_path_buf(),
@@ -552,7 +553,10 @@ fn evaluate_revset(
 
     let mut diagnostics = RevsetDiagnostics::new();
     let expression = parse(&mut diagnostics, revset_str, &context)?;
-    let symbol_resolver = SymbolResolver::new(repo.as_ref(), extensions.symbol_resolvers());
+    let id_prefix_context = IdPrefixContext::new(extensions.clone())
+        .disambiguate_within(RevsetExpression::all());
+    let symbol_resolver = SymbolResolver::new(repo.as_ref(), extensions.symbol_resolvers())
+        .with_id_prefix_context(&id_prefix_context);
     let resolved = expression.resolve_user_expression(repo.as_ref(), &symbol_resolver)?;
     let revset = resolved.evaluate(repo.as_ref())?;
     revset.iter().collect::<Result<Vec<_>, _>>().map_err(Into::into)
