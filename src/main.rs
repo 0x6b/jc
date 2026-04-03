@@ -7,7 +7,7 @@ mod text_formatter;
 
 use std::{
     collections::{HashMap, HashSet},
-    env::{current_dir, var},
+    env::{current_dir, var, vars},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -21,7 +21,10 @@ use colored::Colorize;
 use commit_message_generator::CommitMessageGenerator;
 use config::{Backend, CONFIG, set_backend};
 use console::strip_ansi_codes;
-use diff::{FileChangeSummary, build_collapse_matcher, get_file_change_summary, get_tree_diff};
+use diff::{
+    FileChangeSummary, build_collapse_matcher, get_file_change_summary, get_tree_diff,
+    load_gitattributes,
+};
 use dirs::{config_dir, home_dir};
 use gethostname::gethostname;
 use jj_lib::{
@@ -244,7 +247,7 @@ fn find_workspace(start_dir: &Path) -> Result<Workspace> {
         workspace_path: Some(workspace_root),
         command: None,
         hostname: hostname.as_str(),
-        environment: &std::env::vars().collect(),
+        environment: &vars().collect(),
     };
     let resolved_config = resolve(&config, &context)?;
 
@@ -661,7 +664,11 @@ fn get_parent_tree(repo: &ReadonlyRepo, commit: &Commit) -> MergedTree {
 }
 
 /// Generate a diff between a commit and its parent, with size validation.
-async fn generate_diff(repo: &ReadonlyRepo, commit: &Commit) -> Result<Option<String>> {
+async fn generate_diff(
+    repo: &ReadonlyRepo,
+    commit: &Commit,
+    workspace_root: &Path,
+) -> Result<Option<String>> {
     let current_tree = commit.tree();
     let parent_tree = get_parent_tree(repo, commit);
 
@@ -670,11 +677,13 @@ async fn generate_diff(repo: &ReadonlyRepo, commit: &Commit) -> Result<Option<St
     }
 
     let collapse_matcher = build_collapse_matcher(&CONFIG.diff.collapse_patterns);
+    let gitattr_matcher = load_gitattributes(workspace_root);
     let diff = get_tree_diff(
         repo,
         &parent_tree,
         &current_tree,
         collapse_matcher.as_ref(),
+        gitattr_matcher.as_ref(),
         CONFIG.diff.max_diff_lines,
         CONFIG.diff.max_diff_bytes,
     )
@@ -728,7 +737,7 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Resul
     let repo = snapshot_working_copy(workspace, &repo).await?;
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
 
-    let diff = match generate_diff(&repo, &wc_commit).await? {
+    let diff = match generate_diff(&repo, &wc_commit, workspace.workspace_root()).await? {
         Some(diff) => diff,
         None => {
             println!("No changes detected, nothing to commit");
@@ -766,7 +775,7 @@ async fn run_describe(
     let short_id = &commit_id[..8.min(commit_id.len())];
     debug!(revision = %revision, commit_id = %short_id, "Resolved target revision");
 
-    let diff = match generate_diff(&repo, &commit).await? {
+    let diff = match generate_diff(&repo, &commit, workspace.workspace_root()).await? {
         Some(diff) => diff,
         None => {
             println!("No changes in revision {short_id}, nothing to describe");

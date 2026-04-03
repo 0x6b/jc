@@ -4,7 +4,7 @@ use regex::Regex;
 use tracing::{debug, error, trace, warn};
 
 use crate::{
-    config::CONFIG,
+    config::{CONFIG, backend},
     llm_client::{LlmRequest, invoke},
     text_formatter::format_text,
 };
@@ -48,7 +48,7 @@ impl<'a> CommitMessageGenerator<'a> {
             .replace("{diff_content}", diff_content);
         trace!(prompt_len = prompt.len(), "Prepared prompt");
 
-        let spinner = format!("Generating commit message with {}...", crate::config::backend());
+        let spinner = format!("Generating commit message with {}...", backend());
         let request = LlmRequest::new(&CONFIG.generator, self.model, &prompt, &spinner);
 
         let text = invoke(&request).await?;

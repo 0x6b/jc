@@ -1,4 +1,4 @@
-use std::fmt::Write;
+use std::{fmt::Write, fs::read_to_string, path::Path};
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -46,6 +46,105 @@ pub fn build_collapse_matcher(patterns: &[String]) -> Option<GlobSet> {
         Ok(set) => Some(set),
         Err(e) => {
             warn!(error = %e, "Failed to build collapse matcher");
+            None
+        }
+    }
+}
+
+/// A gitattributes rule: a glob pattern and the reason it should be collapsed.
+struct GitAttrRule {
+    glob: Glob,
+    reason: &'static str,
+}
+
+/// Matcher built from .gitattributes that identifies files to collapse.
+pub struct GitAttrMatcher {
+    globset: GlobSet,
+    /// Parallel vec with globset — each glob's index maps to a reason string.
+    reasons: Vec<&'static str>,
+}
+
+impl GitAttrMatcher {
+    /// Returns the collapse reason if the path matches, or None.
+    pub fn collapse_reason(&self, path: &str) -> Option<&'static str> {
+        let matches = self.globset.matches(path);
+        // Return the first match's reason
+        matches.first().map(|&idx| self.reasons[idx])
+    }
+}
+
+/// Parse a .gitattributes file from the workspace root.
+///
+/// Recognizes these attributes as collapse triggers:
+/// - `-diff` or `diff=false`
+/// - `binary`
+/// - `linguist-generated` or `linguist-generated=true`
+pub fn load_gitattributes(workspace_root: &Path) -> Option<GitAttrMatcher> {
+    let path = workspace_root.join(".gitattributes");
+    let content = read_to_string(&path).ok()?;
+
+    let mut rules = Vec::new();
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Format: <pattern> <attr1> <attr2> ...
+        let mut parts = line.split_whitespace();
+        let pattern = match parts.next() {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let mut reason: Option<&'static str> = None;
+        for attr in parts {
+            match attr {
+                "-diff" | "diff=false" => {
+                    reason = Some("collapsed: gitattributes (-diff)");
+                    break;
+                }
+                "binary" => {
+                    reason = Some("collapsed: gitattributes (binary)");
+                    break;
+                }
+                "linguist-generated" | "linguist-generated=true" => {
+                    reason = Some("collapsed: gitattributes (linguist-generated)");
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(reason) = reason {
+            match Glob::new(pattern) {
+                Ok(glob) => rules.push(GitAttrRule { glob, reason }),
+                Err(e) => {
+                    warn!(pattern = %pattern, error = %e, "Invalid gitattributes pattern, skipping");
+                }
+            }
+        }
+    }
+
+    if rules.is_empty() {
+        return None;
+    }
+
+    let mut builder = GlobSetBuilder::new();
+    let mut reasons = Vec::with_capacity(rules.len());
+    for rule in rules {
+        builder.add(rule.glob);
+        reasons.push(rule.reason);
+    }
+
+    match builder.build() {
+        Ok(globset) => {
+            debug!(count = reasons.len(), "Loaded gitattributes collapse rules");
+            Some(GitAttrMatcher { globset, reasons })
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to build gitattributes matcher");
             None
         }
     }
@@ -102,13 +201,16 @@ async fn format_added_removed_diff(
 
 /// Determine the collapse reason based on limits
 fn collapse_reason(
+    gitattr_reason: Option<&'static str>,
     pattern_match: bool,
     line_count: usize,
     byte_size: usize,
     max_lines: usize,
     max_bytes: usize,
 ) -> &'static str {
-    if pattern_match {
+    if let Some(reason) = gitattr_reason {
+        reason
+    } else if pattern_match {
         "collapsed: matches pattern"
     } else if line_count > max_lines {
         "collapsed: exceeds line limit"
@@ -138,6 +240,7 @@ pub async fn get_tree_diff(
     from_tree: &MergedTree,
     to_tree: &MergedTree,
     collapse_matcher: Option<&GlobSet>,
+    gitattr_matcher: Option<&GitAttrMatcher>,
     max_diff_lines: usize,
     max_diff_bytes: usize,
 ) -> Result<String> {
@@ -151,8 +254,11 @@ pub async fn get_tree_diff(
         let path_str = entry.path.as_internal_file_string();
         let values = entry.values?;
 
-        // Check if this file should be collapsed
-        let should_collapse = collapse_matcher.map(|m| m.is_match(path_str)).unwrap_or(false);
+        // Check if this file should be collapsed (gitattributes takes precedence)
+        let gitattr_reason = gitattr_matcher.and_then(|m| m.collapse_reason(path_str));
+        let should_collapse_pattern =
+            collapse_matcher.map(|m| m.is_match(path_str)).unwrap_or(false);
+        let should_collapse = gitattr_reason.is_some() || should_collapse_pattern;
 
         let diff_output = match (values.before.as_resolved(), values.after.as_resolved()) {
             (Some(None), Some(Some(TreeValue::File { id, .. }))) => {
@@ -165,7 +271,8 @@ pub async fn get_tree_diff(
                 if should_collapse || should_collapse_size {
                     collapsed_count += 1;
                     let reason = collapse_reason(
-                        should_collapse,
+                        gitattr_reason,
+                        should_collapse_pattern,
                         line_count,
                         byte_size,
                         max_diff_lines,
@@ -188,7 +295,8 @@ pub async fn get_tree_diff(
                 if should_collapse || should_collapse_size {
                     collapsed_count += 1;
                     let reason = collapse_reason(
-                        should_collapse,
+                        gitattr_reason,
+                        should_collapse_pattern,
                         line_count,
                         byte_size,
                         max_diff_lines,
@@ -230,7 +338,8 @@ pub async fn get_tree_diff(
                         if should_collapse || should_collapse_size {
                             collapsed_count += 1;
                             let reason = collapse_reason(
-                                should_collapse,
+                                gitattr_reason,
+                                should_collapse_pattern,
                                 added + removed,
                                 byte_size,
                                 max_diff_lines,
