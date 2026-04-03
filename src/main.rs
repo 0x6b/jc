@@ -603,7 +603,7 @@ async fn set_bookmark(repo: &Arc<ReadonlyRepo>, name: &str, commit: &Commit) -> 
         abandon_unreachable_commits: true,
         remote_auto_track_bookmarks: HashMap::new(),
     };
-    if let Err(e) = import_refs(mut_repo, &import_options) {
+    if let Err(e) = import_refs(mut_repo, &import_options).await {
         warn!(error = %e, "Failed to import git refs");
     }
 
