@@ -144,6 +144,16 @@ Loads existing jj configuration from:
 - `~/.jjconfig.toml`
 - `~/.config/jj/config.toml`
 
+### Diff Collapsing
+
+Large or noisy diffs are automatically collapsed to summary lines to keep LLM prompts focused. Collapsing is triggered by:
+
+- **Built-in patterns** — lock files (`*.lock`, `package-lock.json`, etc.), minified files (`*.min.js`, `*.min.css`), generated files (`*.generated.*`, `*.pb.go`, `*.pb.rs`), and vendored directories (`vendor/**`, `node_modules/**`, `third_party/**`)
+- **`.gitattributes`** — files marked with `-diff`, `binary`, or `linguist-generated` in the workspace root `.gitattributes` are collapsed with a distinct reason (e.g., `collapsed: gitattributes (-diff)`)
+- **Size limits** — per-file limits (2048 lines / 64 KB) and total diff limits (8192 lines / 256 KB) truncate remaining large diffs
+
+Collapsed files still appear in the diff output as a one-line summary so the LLM knows the file changed.
+
 ### Codex CLI
 
 Uses Codex CLI's existing configuration. Ensure it is authenticated.
