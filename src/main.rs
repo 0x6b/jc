@@ -779,6 +779,13 @@ async fn run_describe(
     let short_id = &commit_id[..8.min(commit_id.len())];
     debug!(revision = %revision, commit_id = %short_id, "Resolved target revision");
 
+    if !commit.description().trim().is_empty() {
+        bail!(
+            "Revision {short_id} already has a description; refusing to overwrite. \
+             Use `jj describe` to edit it manually."
+        );
+    }
+
     let diff = match generate_diff(&repo, &commit, workspace.workspace_root()).await? {
         Some(diff) => diff,
         None => {
