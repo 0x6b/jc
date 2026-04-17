@@ -1,6 +1,6 @@
 [package]
 name = "jc"
-version = "0.13.2"
+version = "0.13.3"
 edition = "2024"
 description = "Auto-commit changes in a jj workspace using LLM-generated commit messages"
 
