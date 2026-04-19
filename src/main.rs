@@ -62,11 +62,11 @@ struct Args {
     path: Option<PathBuf>,
 
     /// LLM backend to use
-    #[arg(short, long, default_value = "codex", env = "CCC_JJ_BACKEND", global = true)]
+    #[arg(short, long, default_value = "codex", env = "JC_BACKEND", global = true)]
     backend: Backend,
 
     /// Model to use for AI generation (defaults to backend's default)
-    #[arg(short, long, default_value = "auto", env = "CCC_JJ_MODEL", global = true)]
+    #[arg(short, long, default_value = "auto", env = "JC_MODEL", global = true)]
     model: String,
 
     #[command(subcommand)]
@@ -98,7 +98,7 @@ enum Commands {
     #[command(alias = "c")]
     Commit {
         /// Language to use for commit messages
-        #[arg(short, long, default_value = "English", env = "CCC_JJ_LANGUAGE")]
+        #[arg(short, long, default_value = "English", env = "JC_LANGUAGE")]
         language: String,
     },
     /// Generate and set a commit description using AI (without creating a new commit)
@@ -109,7 +109,7 @@ enum Commands {
         revision: String,
 
         /// Language to use for commit messages
-        #[arg(short, long, default_value = "English", env = "CCC_JJ_LANGUAGE")]
+        #[arg(short, long, default_value = "English", env = "JC_LANGUAGE")]
         language: String,
     },
 }

@@ -27,7 +27,7 @@ A [Jujutsu](https://www.jj-vcs.dev/) (`jj`) CLI tool that uses Codex to generate
 ## Installation
 
 ```console
-$ cargo install --git https://github.com/0x6b/ccc-jj
+$ cargo install --git https://github.com/0x6b/jc
 ```
 
 ## Usage
