@@ -739,6 +739,10 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Resul
     }
 
     let repo = snapshot_working_copy(workspace, &repo).await?;
+    let wc_commit_id = repo
+        .view()
+        .get_wc_commit_id(workspace.workspace_name())
+        .context("workspace should have a working-copy commit")?;
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
 
     let diff = match generate_diff(&repo, &wc_commit, workspace.workspace_root()).await? {
