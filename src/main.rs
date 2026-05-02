@@ -553,8 +553,8 @@ fn evaluate_revset(
 
     let mut diagnostics = RevsetDiagnostics::new();
     let expression = parse(&mut diagnostics, revset_str, &context)?;
-    let id_prefix_context = IdPrefixContext::new(extensions.clone())
-        .disambiguate_within(RevsetExpression::all());
+    let id_prefix_context =
+        IdPrefixContext::new(extensions.clone()).disambiguate_within(RevsetExpression::all());
     let symbol_resolver = SymbolResolver::new(repo.as_ref(), extensions.symbol_resolvers())
         .with_id_prefix_context(&id_prefix_context);
     let resolved = expression.resolve_user_expression(repo.as_ref(), &symbol_resolver)?;
@@ -840,7 +840,7 @@ fn format_box_with_title(title: &str, content: &str, width: usize) -> String {
 
     // Top border with title: ╭─Title───...───╮
     let remaining = width + 2 - title_width - 1; // -1 for the leading ─
-    let border = "─".repeat(remaining.max(0));
+    let border = "─".repeat(remaining);
     result.push_str(&format!(
         "{}{title}{}{}\n",
         "╭─".white().dimmed(),
