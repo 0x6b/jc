@@ -642,6 +642,12 @@ async fn snapshot_working_copy(
     repo: &Arc<ReadonlyRepo>,
 ) -> Result<Arc<ReadonlyRepo>> {
     debug!("Starting working copy mutation");
+    let wc_commit_id = repo
+        .view()
+        .get_wc_commit_id(workspace.workspace_name())
+        .context("workspace should have a working-copy commit")?;
+    let wc_commit = repo.store().get_commit(wc_commit_id)?;
+
     let mut locked_wc = workspace.working_copy().start_mutation()?;
     let base_ignores = load_base_ignores(workspace.workspace_root())?;
     let snapshot_options = SnapshotOptions {
@@ -651,10 +657,30 @@ async fn snapshot_working_copy(
         force_tracking_matcher: &jj_lib::matchers::NothingMatcher,
         max_new_file_size: 1024 * 1024 * 100,
     };
-    let (_tree, _stats) = locked_wc.snapshot(&snapshot_options).await?;
+    let (new_tree, _stats) = locked_wc.snapshot(&snapshot_options).await?;
     debug!("Snapshot complete");
-    locked_wc.finish(repo.operation().id().clone()).await?;
-    workspace.repo_loader().load_at_head().await.map_err(Into::into)
+
+    let final_repo = if new_tree.tree_ids_and_labels() != wc_commit.tree().tree_ids_and_labels() {
+        debug!("Working copy tree changed; rewriting working-copy commit");
+        let mut tx = repo.start_transaction();
+        tx.set_is_snapshot(true);
+        let mut_repo = tx.repo_mut();
+        let new_commit = mut_repo
+            .rewrite_commit(&wc_commit)
+            .set_tree(new_tree)
+            .write()
+            .await?;
+        mut_repo
+            .set_wc_commit(workspace.workspace_name().to_owned(), new_commit.id().clone())?;
+        mut_repo.rebase_descendants().await?;
+        tx.commit("snapshot working copy").await?
+    } else {
+        debug!("Working copy tree unchanged");
+        repo.clone()
+    };
+
+    locked_wc.finish(final_repo.op_id().clone()).await?;
+    Ok(final_repo)
 }
 
 /// Get parent tree for a commit.
