@@ -968,20 +968,25 @@ fn print_file_changes(changes: &FileChangeSummary) {
 mod tests {
     use super::*;
 
+    fn stripped_width(line: &str) -> usize {
+        strip_ansi_codes(line).width()
+    }
+
     #[test]
     fn test_format_box_with_title_ascii() {
         let result = format_box_with_title("Title", "Hello", 72);
-        assert!(result.contains("╭─Title"));
-        assert!(result.contains("│ Hello"));
+        let plain = strip_ansi_codes(&result);
+        assert!(plain.contains("╭─Title"));
+        assert!(plain.contains("│ Hello"));
         // All lines should have same width (72 + 4 for borders and spaces)
-        let line_widths: Vec<usize> = result.lines().map(|l| l.width()).collect();
+        let line_widths: Vec<usize> = result.lines().map(stripped_width).collect();
         assert!(line_widths.iter().all(|&w| w == 76));
     }
 
     #[test]
     fn test_format_box_with_title_japanese() {
         let result = format_box_with_title("コミット", "こんにちは", 72);
-        let line_widths: Vec<usize> = result.lines().map(|l| l.width()).collect();
+        let line_widths: Vec<usize> = result.lines().map(stripped_width).collect();
         // All lines should have same display width
         assert!(line_widths.iter().all(|&w| w == 76));
     }
@@ -989,7 +994,7 @@ mod tests {
     #[test]
     fn test_format_box_with_title_mixed() {
         let result = format_box_with_title("Commit by 太郎", "Hello こんにちは World", 72);
-        let line_widths: Vec<usize> = result.lines().map(|l| l.width()).collect();
+        let line_widths: Vec<usize> = result.lines().map(stripped_width).collect();
         assert!(line_widths.iter().all(|&w| w == 76));
     }
 
@@ -997,7 +1002,7 @@ mod tests {
     fn test_format_box_with_title_multiline() {
         let content = "タイトル\n\nこれは日本語のテストです";
         let result = format_box_with_title("Committed change a05fdfa2", content, 72);
-        let line_widths: Vec<usize> = result.lines().map(|l| l.width()).collect();
+        let line_widths: Vec<usize> = result.lines().map(stripped_width).collect();
         // All lines should have same display width
         assert!(line_widths.iter().all(|&w| w == 76));
     }
@@ -1007,22 +1012,23 @@ mod tests {
         let result = format_box_with_title("Title", "Short", 72);
         let first_line = result.lines().next().unwrap_or("");
         // width=72, plus 4 for borders and spaces = 76
-        assert_eq!(first_line.width(), 76);
+        assert_eq!(stripped_width(first_line), 76);
     }
 
     #[test]
     fn test_format_box_with_title_empty_content() {
         let result = format_box_with_title("Title", "", 72);
         let first_line = result.lines().next().unwrap_or("");
-        assert!(first_line.contains("╭─Title"));
-        assert!(result.contains("╰"));
+        assert!(strip_ansi_codes(first_line).contains("╭─Title"));
+        assert!(strip_ansi_codes(&result).contains("╰"));
     }
 
     #[test]
     fn test_format_box_with_title_long_title() {
         let result = format_box_with_title("This is an extremely long title that exceeds the box width", "Short", 20);
         // Should not panic; may have no border padding but still produce output
-        assert!(result.contains("╭─"));
-        assert!(result.contains("╮"));
+        let plain = strip_ansi_codes(&result);
+        assert!(plain.contains("╭─"));
+        assert!(plain.contains("╮"));
     }
 }
