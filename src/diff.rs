@@ -1,11 +1,11 @@
-use std::{fmt::Write, fs::read_to_string, path::Path};
+use std::{collections::HashMap, fmt::Write, fs::read_to_string, path::Path};
 
 use anyhow::Result;
 use futures::StreamExt;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use jj_lib::{
     backend::{FileId, TreeValue},
-    merged_tree::MergedTree,
+    merged_tree::{MergedTree, TreeDiffEntry},
     repo::{ReadonlyRepo, Repo},
     repo_path::RepoPath,
 };
@@ -240,7 +240,66 @@ pub struct TreeDiffResult {
     pub collapsed_count: usize,
 }
 
-/// Get the diff between two trees using jj-lib
+/// Buffer a diff stream so we can detect exact renames.
+async fn buffer_diff_stream(
+    from_tree: &MergedTree,
+    to_tree: &MergedTree,
+) -> Result<Vec<TreeDiffEntry>> {
+    let mut stream = from_tree.diff_stream(to_tree, &jj_lib::matchers::EverythingMatcher);
+    let mut entries = Vec::new();
+    while let Some(entry) = stream.next().await {
+        entries.push(entry);
+    }
+    Ok(entries)
+}
+
+/// Classification of a buffered diff entry.
+enum EntryKind<'a> {
+    Added { path: &'a RepoPath, path_str: &'a str, id: &'a FileId },
+    Deleted { path: &'a RepoPath, path_str: &'a str, id: &'a FileId },
+    Modified {
+        path: &'a RepoPath,
+        path_str: &'a str,
+        before_id: &'a FileId,
+        after_id: &'a FileId,
+    },
+    Conflicted { path_str: &'a str },
+    Skipped,
+}
+
+fn classify_entry<'a>(
+    entry: &'a TreeDiffEntry,
+) -> Result<EntryKind<'a>> {
+    let path_str = entry.path.as_internal_file_string();
+    let values = entry.values.as_ref().map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    match (values.before.as_resolved(), values.after.as_resolved()) {
+        (Some(None), Some(Some(TreeValue::File { id, .. }))) => {
+            Ok(EntryKind::Added { path: &entry.path, path_str, id })
+        }
+        (Some(Some(TreeValue::File { id, .. })), Some(None)) => {
+            Ok(EntryKind::Deleted { path: &entry.path, path_str, id })
+        }
+        (
+            Some(Some(TreeValue::File { id: before_id, .. })),
+            Some(Some(TreeValue::File { id: after_id, .. })),
+        ) => Ok(EntryKind::Modified {
+            path: &entry.path,
+            path_str,
+            before_id,
+            after_id,
+        }),
+        _ => {
+            if values.before.as_resolved().is_none() || values.after.as_resolved().is_none() {
+                Ok(EntryKind::Conflicted { path_str })
+            } else {
+                Ok(EntryKind::Skipped)
+            }
+        }
+    }
+}
+
+/// Get the diff between two trees using jj-lib, with exact-rename detection.
 pub async fn get_tree_diff(
     repo: &ReadonlyRepo,
     from_tree: &MergedTree,
@@ -251,136 +310,194 @@ pub async fn get_tree_diff(
     max_diff_bytes: usize,
 ) -> Result<TreeDiffResult> {
     debug!("Starting tree diff");
+    let entries = buffer_diff_stream(from_tree, to_tree).await?;
+
+    // First pass: classify and build rename index
+    let mut classified: Vec<EntryKind<'_>> = Vec::with_capacity(entries.len());
+    let mut deleted_by_id: HashMap<&FileId, Vec<usize>> = HashMap::new();
+
+    for (i, entry) in entries.iter().enumerate() {
+        let kind = classify_entry(entry)?;
+        if let EntryKind::Deleted { id, .. } = kind {
+            deleted_by_id.entry(id).or_default().push(i);
+        }
+        classified.push(kind);
+    }
+
+    // Match exact renames (added files whose ID matches a deleted file)
+    let mut renamed = vec![false; entries.len()];
+    for (i, kind) in classified.iter().enumerate() {
+        if let EntryKind::Added { id, .. } = kind {
+            if let Some(candidates) = deleted_by_id.get_mut(id) {
+                if let Some(deleted_idx) = candidates.pop() {
+                    renamed[i] = true;
+                    renamed[deleted_idx] = true;
+                }
+            }
+        }
+    }
+
     let mut output = String::new();
-    let mut stream = from_tree.diff_stream(to_tree, &jj_lib::matchers::EverythingMatcher);
     let mut file_count = 0;
     let mut collapsed_count = 0;
 
-    while let Some(entry) = stream.next().await {
-        let path_str = entry.path.as_internal_file_string();
-        let values = entry.values?;
-
-        // Check if this file should be collapsed (gitattributes takes precedence)
-        let gitattr_reason = gitattr_matcher.and_then(|m| m.collapse_reason(path_str));
-        let should_collapse_pattern =
-            collapse_matcher.map(|m| m.is_match(path_str)).unwrap_or(false);
-        let should_collapse = gitattr_reason.is_some() || should_collapse_pattern;
-
-        let diff_output = match (values.before.as_resolved(), values.after.as_resolved()) {
-            (Some(None), Some(Some(TreeValue::File { id, .. }))) => {
-                let content = read_file_content(repo, &entry.path, id).await?;
-                let byte_size = content.len();
-                let line_count = String::from_utf8_lossy(&content).lines().count();
-                let should_collapse_size =
-                    line_count > max_diff_lines || byte_size > max_diff_bytes;
-                trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = line_count, bytes = byte_size, "Processing added file");
-                if should_collapse || should_collapse_size {
-                    collapsed_count += 1;
-                    let reason = collapse_reason(
-                        gitattr_reason,
-                        should_collapse_pattern,
-                        line_count,
-                        byte_size,
-                        max_diff_lines,
-                        max_diff_bytes,
-                    );
-                    format_collapsed_summary(path_str, line_count, 0, "new file", reason)
-                } else {
-                    format_added_removed_diff(repo, &entry.path, path_str, id, true, MAX_LINES)
-                        .await?
+    // Emit renames first
+    for (i, kind) in classified.iter().enumerate() {
+        if !renamed[i] {
+            continue;
+        }
+        if let EntryKind::Added { path_str, .. } = kind {
+            for (j, other) in classified.iter().enumerate() {
+                if renamed[j] && j != i {
+                    if let EntryKind::Deleted {
+                        path_str: old_path, ..
+                    } = other
+                    {
+                        trace!(old = %old_path, new = %path_str, "Exact rename detected");
+                        file_count += 1;
+                        output.push_str(&format!(
+                            "diff --git a/{old_path} b/{path_str}\nrename from {old_path}\nrename to {path_str}\n"
+                        ));
+                        break;
+                    }
                 }
             }
+        }
+    }
 
-            (Some(Some(TreeValue::File { id, .. })), Some(None)) => {
-                let content = read_file_content(repo, &entry.path, id).await?;
-                let byte_size = content.len();
-                let line_count = String::from_utf8_lossy(&content).lines().count();
-                let should_collapse_size =
-                    line_count > max_diff_lines || byte_size > max_diff_bytes;
-                trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = line_count, bytes = byte_size, "Processing deleted file");
-                if should_collapse || should_collapse_size {
-                    collapsed_count += 1;
-                    let reason = collapse_reason(
-                        gitattr_reason,
-                        should_collapse_pattern,
-                        line_count,
-                        byte_size,
-                        max_diff_lines,
-                        max_diff_bytes,
-                    );
-                    format_collapsed_summary(path_str, 0, line_count, "deleted file", reason)
-                } else {
-                    format_added_removed_diff(repo, &entry.path, path_str, id, false, MAX_LINES)
-                        .await?
-                }
+    // Emit everything else
+    for (i, kind) in classified.iter().enumerate() {
+        if renamed[i] {
+            continue;
+        }
+        let diff_output = match kind {
+            EntryKind::Conflicted { path_str } => {
+                trace!(path = %path_str, "Conflicted file");
+                Some(format!(
+                    "diff --git a/{path_str} b/{path_str}\n(conflicted file)\n"
+                ))
             }
+            EntryKind::Skipped => None,
+            _ => {
+                let path_str = match kind {
+                    EntryKind::Added { path_str, .. }
+                    | EntryKind::Deleted { path_str, .. }
+                    | EntryKind::Modified { path_str, .. } => *path_str,
+                    _ => unreachable!(),
+                };
+                let gitattr_reason = gitattr_matcher.and_then(|m| m.collapse_reason(path_str));
+                let should_collapse_pattern =
+                    collapse_matcher.map(|m| m.is_match(path_str)).unwrap_or(false);
+                let should_collapse = gitattr_reason.is_some() || should_collapse_pattern;
 
-            (
-                Some(Some(TreeValue::File { id: before_id, .. })),
-                Some(Some(TreeValue::File { id: after_id, .. })),
-            ) => {
-                let (before_content, after_content) = try_join!(
-                    read_file_content(repo, &entry.path, before_id),
-                    read_file_content(repo, &entry.path, after_id)
-                )?;
-
-                // Compute byte_size before consuming the buffers
-                let byte_size = before_content.len().max(after_content.len());
-
-                match (String::from_utf8(before_content), String::from_utf8(after_content)) {
-                    (Ok(before_text), Ok(after_text)) => {
-                        let diff = TextDiff::from_lines(&before_text, &after_text);
-                        let added = diff
-                            .iter_all_changes()
-                            .filter(|c| c.tag() == similar::ChangeTag::Insert)
-                            .count();
-                        let removed = diff
-                            .iter_all_changes()
-                            .filter(|c| c.tag() == similar::ChangeTag::Delete)
-                            .count();
+                match kind {
+                    EntryKind::Added { path, id, .. } => {
+                        let content = read_file_content(repo, path, id).await?;
+                        let byte_size = content.len();
+                        let line_count = String::from_utf8_lossy(&content).lines().count();
                         let should_collapse_size =
-                            added + removed > max_diff_lines || byte_size > max_diff_bytes;
-                        trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = added + removed, bytes = byte_size, "Processing modified file");
+                            line_count > max_diff_lines || byte_size > max_diff_bytes;
+                        trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = line_count, bytes = byte_size, "Processing added file");
                         if should_collapse || should_collapse_size {
                             collapsed_count += 1;
                             let reason = collapse_reason(
                                 gitattr_reason,
-                                should_collapse_pattern,
-                                added + removed,
+                                should_collapse,
+                                line_count,
                                 byte_size,
                                 max_diff_lines,
                                 max_diff_bytes,
                             );
-                            format_collapsed_summary(path_str, added, removed, "modified", reason)
+                            Some(format_collapsed_summary(path_str, line_count, 0, "new file", reason))
                         } else {
-                            format!(
-                                "diff --git a/{0} b/{0}\n{1}",
-                                path_str,
-                                diff.unified_diff()
-                                    .context_radius(CONTEXT_LINES)
-                                    .header(&format!("a/{path_str}"), &format!("b/{path_str}"))
-                            )
+                            Some(format_added_removed_diff(repo, path, path_str, id, true, MAX_LINES).await?)
                         }
                     }
-                    _ => {
-                        trace!(path = %path_str, "Binary file modified");
-                        format!("diff --git a/{path_str} b/{path_str}\n(binary file modified)\n")
+                    EntryKind::Deleted { path, id, .. } => {
+                        let content = read_file_content(repo, path, id).await?;
+                        let byte_size = content.len();
+                        let line_count = String::from_utf8_lossy(&content).lines().count();
+                        let should_collapse_size =
+                            line_count > max_diff_lines || byte_size > max_diff_bytes;
+                        trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = line_count, bytes = byte_size, "Processing deleted file");
+                        if should_collapse || should_collapse_size {
+                            collapsed_count += 1;
+                            let reason = collapse_reason(
+                                gitattr_reason,
+                                should_collapse,
+                                line_count,
+                                byte_size,
+                                max_diff_lines,
+                                max_diff_bytes,
+                            );
+                            Some(format_collapsed_summary(path_str, 0, line_count, "deleted file", reason))
+                        } else {
+                            Some(format_added_removed_diff(repo, path, path_str, id, false, MAX_LINES).await?)
+                        }
                     }
-                }
-            }
-            _ => {
-                if values.before.as_resolved().is_none() || values.after.as_resolved().is_none() {
-                    trace!(path = %path_str, "Conflicted file");
-                    format!("diff --git a/{path_str} b/{path_str}\n(conflicted file)\n")
-                } else {
-                    String::new()
+                    EntryKind::Modified {
+                        path,
+                        before_id,
+                        after_id,
+                        ..
+                    } => {
+                        let (before_content, after_content) = try_join!(
+                            read_file_content(repo, path, before_id),
+                            read_file_content(repo, path, after_id)
+                        )?;
+                        let byte_size = before_content.len().max(after_content.len());
+
+                        match (String::from_utf8(before_content), String::from_utf8(after_content)) {
+                            (Ok(before_text), Ok(after_text)) => {
+                                let diff = TextDiff::from_lines(&before_text, &after_text);
+                                let added = diff
+                                    .iter_all_changes()
+                                    .filter(|c| c.tag() == similar::ChangeTag::Insert)
+                                    .count();
+                                let removed = diff
+                                    .iter_all_changes()
+                                    .filter(|c| c.tag() == similar::ChangeTag::Delete)
+                                    .count();
+                                let should_collapse_size =
+                                    added + removed > max_diff_lines || byte_size > max_diff_bytes;
+                                trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = added + removed, bytes = byte_size, "Processing modified file");
+                                if should_collapse || should_collapse_size {
+                                    collapsed_count += 1;
+                                    let reason = collapse_reason(
+                                        gitattr_reason,
+                                        should_collapse,
+                                        added + removed,
+                                        byte_size,
+                                        max_diff_lines,
+                                        max_diff_bytes,
+                                    );
+                                    Some(format_collapsed_summary(path_str, added, removed, "modified", reason))
+                                } else {
+                                    Some(format!(
+                                        "diff --git a/{0} b/{0}\n{1}",
+                                        path_str,
+                                        diff.unified_diff()
+                                            .context_radius(CONTEXT_LINES)
+                                            .header(&format!("a/{path_str}"), &format!("b/{path_str}"))
+                                    ))
+                                }
+                            }
+                            _ => {
+                                trace!(path = %path_str, "Binary file modified");
+                                Some(format!("diff --git a/{path_str} b/{path_str}\n(binary file modified)\n"))
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
                 }
             }
         };
 
-        if !diff_output.is_empty() {
-            file_count += 1;
-            output.push_str(&diff_output);
+        if let Some(diff) = diff_output {
+            if !diff.is_empty() {
+                file_count += 1;
+                output.push_str(&diff);
+            }
         }
     }
 
