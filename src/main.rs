@@ -500,25 +500,33 @@ fn resolve_bookmark_target(
     }
 }
 
+const DEFAULT_BASE_BRANCHES: &[&str] = &["main", "master", "trunk", "develop"];
+
 fn find_default_base(repo: &Arc<ReadonlyRepo>) -> Result<String> {
     let view = repo.view();
     let remote_name = RemoteName::new("origin");
-    let main_ref = RefName::new("main");
 
-    let remote_symbol = main_ref.to_remote_symbol(remote_name);
-    let remote_ref = view.get_remote_bookmark(remote_symbol);
-    if remote_ref.target.is_present() {
-        debug!("Using main@origin as base");
-        return Ok("main@origin".to_string());
+    for &name in DEFAULT_BASE_BRANCHES {
+        let ref_name = RefName::new(name);
+
+        let remote_symbol = ref_name.to_remote_symbol(remote_name);
+        let remote_ref = view.get_remote_bookmark(remote_symbol);
+        if remote_ref.target.is_present() {
+            debug!("Using {name}@origin as base");
+            return Ok(format!("{name}@origin"));
+        }
+
+        let local_ref = view.get_local_bookmark(ref_name);
+        if local_ref.is_present() {
+            debug!("Using {name} as base");
+            return Ok(name.to_string());
+        }
     }
 
-    let local_ref = view.get_local_bookmark(main_ref);
-    if local_ref.is_present() {
-        debug!("Using main as base");
-        return Ok("main".to_string());
-    }
-
-    bail!("Could not find main@origin or main bookmark. Please specify --from explicitly.")
+    bail!(
+        "Could not find a default base branch ({}). Please specify --from explicitly.",
+        DEFAULT_BASE_BRANCHES.join(", ")
+    )
 }
 
 /// Evaluate a revset expression and return the matching commit IDs.
