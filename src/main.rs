@@ -22,8 +22,8 @@ use commit_message_generator::CommitMessageGenerator;
 use config::{Backend, CONFIG, set_backend};
 use console::strip_ansi_codes;
 use diff::{
-    FileChangeSummary, build_collapse_matcher, get_file_change_summary, get_tree_diff,
-    load_gitattributes,
+    FileChangeSummary, TreeDiffResult, build_collapse_matcher, get_file_change_summary,
+    get_tree_diff, load_gitattributes,
 };
 use dirs::{config_dir, home_dir};
 use gethostname::gethostname;
@@ -697,11 +697,12 @@ fn get_parent_tree(repo: &ReadonlyRepo, commit: &Commit) -> MergedTree {
 }
 
 /// Generate a diff between a commit and its parent, with size validation.
+/// Returns `Some((diff, collapsed_count))` or `None` if unchanged.
 async fn generate_diff(
     repo: &ReadonlyRepo,
     commit: &Commit,
     workspace_root: &Path,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, usize)>> {
     let current_tree = commit.tree();
     let parent_tree = get_parent_tree(repo, commit);
 
@@ -711,7 +712,7 @@ async fn generate_diff(
 
     let collapse_matcher = build_collapse_matcher(&CONFIG.diff.collapse_patterns);
     let gitattr_matcher = load_gitattributes(workspace_root);
-    let diff = get_tree_diff(
+    let TreeDiffResult { diff, collapsed_count } = get_tree_diff(
         repo,
         &parent_tree,
         &current_tree,
@@ -738,7 +739,7 @@ async fn generate_diff(
         );
     }
 
-    Ok(Some(diff))
+    Ok(Some((diff, collapsed_count)))
 }
 
 /// Generate a commit message from a diff using the configured LLM backend.
@@ -774,13 +775,17 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Resul
         .context("workspace should have a working-copy commit")?;
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
 
-    let diff = match generate_diff(&repo, &wc_commit, workspace.workspace_root()).await? {
-        Some(diff) => diff,
+    let (diff, collapsed_count) = match generate_diff(&repo, &wc_commit, workspace.workspace_root()).await? {
+        Some(result) => result,
         None => {
             println!("No changes detected, nothing to commit");
             return Ok(());
         }
     };
+
+    if collapsed_count > 0 {
+        eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
+    }
 
     let commit_message = generate_message(&diff, language, model).await?;
     debug!(commit_message = %commit_message, "Generated commit message");
@@ -819,13 +824,17 @@ async fn run_describe(
         );
     }
 
-    let diff = match generate_diff(&repo, &commit, workspace.workspace_root()).await? {
-        Some(diff) => diff,
+    let (diff, collapsed_count) = match generate_diff(&repo, &commit, workspace.workspace_root()).await? {
+        Some(result) => result,
         None => {
             println!("No changes in revision {short_id}, nothing to describe");
             return Ok(());
         }
     };
+
+    if collapsed_count > 0 {
+        eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
+    }
 
     let description = generate_message(&diff, language, model).await?;
     debug!(description = %description, "Generated description");

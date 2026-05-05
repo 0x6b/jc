@@ -234,6 +234,12 @@ fn format_collapsed_summary(
     )
 }
 
+/// Result of [`get_tree_diff`]: the diff string and how many files were collapsed.
+pub struct TreeDiffResult {
+    pub diff: String,
+    pub collapsed_count: usize,
+}
+
 /// Get the diff between two trees using jj-lib
 pub async fn get_tree_diff(
     repo: &ReadonlyRepo,
@@ -243,7 +249,7 @@ pub async fn get_tree_diff(
     gitattr_matcher: Option<&GitAttrMatcher>,
     max_diff_lines: usize,
     max_diff_bytes: usize,
-) -> Result<String> {
+) -> Result<TreeDiffResult> {
     debug!("Starting tree diff");
     let mut output = String::new();
     let mut stream = from_tree.diff_stream(to_tree, &jj_lib::matchers::EverythingMatcher);
@@ -372,7 +378,7 @@ pub async fn get_tree_diff(
     }
 
     debug!(file_count, collapsed_count, output_len = output.len(), "Tree diff complete");
-    Ok(output)
+    Ok(TreeDiffResult { diff: output, collapsed_count })
 }
 
 /// Get summary of file changes between two trees
