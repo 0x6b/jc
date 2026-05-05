@@ -9,7 +9,7 @@ use crate::{
 };
 
 static VALID_BOOKMARK_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[a-z][a-z0-9]*(-[a-z][a-z0-9]*){1,5}$").expect("Failed to compile bookmark regex")
+    Regex::new(r"^[a-z][a-z0-9]*(-[a-z0-9]+){1,7}$").expect("Failed to compile bookmark regex")
 });
 
 pub struct BookmarkGenerator<'a> {

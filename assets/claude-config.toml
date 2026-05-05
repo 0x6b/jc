@@ -10,7 +10,7 @@ Generate a short, descriptive bookmark (branch) name for the following commits.
 
 Rules:
 - Use 2-6 lowercase words separated by hyphens (e.g., "add-user-auth", "fix-login-redirect")
-- Each word segment MUST start with a letter, NOT a digit (e.g., "v2-support" not "2-support")
+- First segment MUST start with a letter; subsequent segments may start with digits (e.g., "update-2fa-support")
 - Describe WHAT changed, not version numbers (e.g., "update-woff2-converter" not "release-v-zero-eleven")
 - Focus on the single most significant change - do NOT try to cover all changes
 - Be specific but concise
