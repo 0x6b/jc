@@ -101,7 +101,7 @@ enum Commands {
         #[arg(short, long, default_value = "English", env = "JC_LANGUAGE")]
         language: String,
     },
-    /// Generate and set a commit description using AI (without creating a new commit)
+    /// Generate and set a commit description without creating a new commit
     #[command(alias = "d")]
     Describe {
         /// Revision to describe (default: @)
@@ -665,13 +665,8 @@ async fn snapshot_working_copy(
         let mut tx = repo.start_transaction();
         tx.set_is_snapshot(true);
         let mut_repo = tx.repo_mut();
-        let new_commit = mut_repo
-            .rewrite_commit(&wc_commit)
-            .set_tree(new_tree)
-            .write()
-            .await?;
-        mut_repo
-            .set_wc_commit(workspace.workspace_name().to_owned(), new_commit.id().clone())?;
+        let new_commit = mut_repo.rewrite_commit(&wc_commit).set_tree(new_tree).write().await?;
+        mut_repo.set_wc_commit(workspace.workspace_name().to_owned(), new_commit.id().clone())?;
         mut_repo.rebase_descendants().await?;
         tx.commit("snapshot working copy").await?
     } else {
