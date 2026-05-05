@@ -104,6 +104,10 @@ enum Commands {
         /// Overwrite existing description
         #[arg(short, long)]
         force: bool,
+
+        /// Only print the generated message, don't commit
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Generate and set a commit description without creating a new commit
     #[command(alias = "d")]
@@ -119,12 +123,16 @@ enum Commands {
         /// Overwrite existing description
         #[arg(short, long)]
         force: bool,
+
+        /// Only print the generated message, don't apply it
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
 impl Default for Commands {
     fn default() -> Self {
-        Commands::Commit { language: "English".to_string(), force: false }
+        Commands::Commit { language: "English".to_string(), force: false, dry_run: false }
     }
 }
 
@@ -366,11 +374,11 @@ async fn main() -> Result<()> {
         Commands::Bookmark { from, to, prefix, dry_run } => {
             run_bookmark(&workspace, &model, from, &to, prefix, dry_run).await
         }
-        Commands::Commit { language, force } => {
-            run_commit(&workspace, &language, &model, force).await
+        Commands::Commit { language, force, dry_run } => {
+            run_commit(&workspace, &language, &model, force, dry_run).await
         }
-        Commands::Describe { revision, language, force } => {
-            run_describe(&workspace, &language, &model, &revision, force).await
+        Commands::Describe { revision, language, force, dry_run } => {
+            run_describe(&workspace, &language, &model, &revision, force, dry_run).await
         }
     }
 }
@@ -768,7 +776,7 @@ async fn generate_message(diff: &str, language: &str, model: &str) -> Result<Str
     }
 }
 
-async fn run_commit(workspace: &Workspace, language: &str, model: &str, force: bool) -> Result<()> {
+async fn run_commit(workspace: &Workspace, language: &str, model: &str, force: bool, dry_run: bool) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
 
@@ -806,6 +814,11 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str, force: b
     let commit_message = generate_message(&diff, language, model).await?;
     debug!(commit_message = %commit_message, "Generated commit message");
 
+    if dry_run {
+        println!("{commit_message}");
+        return Ok(());
+    }
+
     let current_tree = wc_commit.tree();
     let file_changes =
         get_file_change_summary(&get_parent_tree(&repo, &wc_commit), &current_tree).await;
@@ -823,6 +836,7 @@ async fn run_describe(
     model: &str,
     revision: &str,
     force: bool,
+    dry_run: bool,
 ) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
@@ -855,6 +869,11 @@ async fn run_describe(
 
     let description = generate_message(&diff, language, model).await?;
     debug!(description = %description, "Generated description");
+
+    if dry_run {
+        println!("{description}");
+        return Ok(());
+    }
 
     let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
