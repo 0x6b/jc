@@ -100,6 +100,10 @@ enum Commands {
         /// Language to use for commit messages
         #[arg(short, long, default_value = "English", env = "JC_LANGUAGE")]
         language: String,
+
+        /// Overwrite existing description
+        #[arg(short, long)]
+        force: bool,
     },
     /// Generate and set a commit description without creating a new commit
     #[command(alias = "d")]
@@ -111,12 +115,16 @@ enum Commands {
         /// Language to use for commit messages
         #[arg(short, long, default_value = "English", env = "JC_LANGUAGE")]
         language: String,
+
+        /// Overwrite existing description
+        #[arg(short, long)]
+        force: bool,
     },
 }
 
 impl Default for Commands {
     fn default() -> Self {
-        Commands::Commit { language: "English".to_string() }
+        Commands::Commit { language: "English".to_string(), force: false }
     }
 }
 
@@ -358,9 +366,11 @@ async fn main() -> Result<()> {
         Commands::Bookmark { from, to, prefix, dry_run } => {
             run_bookmark(&workspace, &model, from, &to, prefix, dry_run).await
         }
-        Commands::Commit { language } => run_commit(&workspace, &language, &model).await,
-        Commands::Describe { revision, language } => {
-            run_describe(&workspace, &language, &model, &revision).await
+        Commands::Commit { language, force } => {
+            run_commit(&workspace, &language, &model, force).await
+        }
+        Commands::Describe { revision, language, force } => {
+            run_describe(&workspace, &language, &model, &revision, force).await
         }
     }
 }
@@ -758,7 +768,7 @@ async fn generate_message(diff: &str, language: &str, model: &str) -> Result<Str
     }
 }
 
-async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Result<()> {
+async fn run_commit(workspace: &Workspace, language: &str, model: &str, force: bool) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
 
@@ -769,8 +779,8 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str) -> Resul
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
     debug!(wc_commit_id = %wc_commit_id.hex(), "Working copy commit");
 
-    if !wc_commit.description().is_empty() {
-        warn!(description = %wc_commit.description(), "Working copy already has description, skipping");
+    if !wc_commit.description().is_empty() && !force {
+        warn!(description = %wc_commit.description(), "Working copy already has description, skipping (use --force to overwrite)");
         return Ok(());
     }
 
@@ -812,6 +822,7 @@ async fn run_describe(
     language: &str,
     model: &str,
     revision: &str,
+    force: bool,
 ) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
@@ -823,10 +834,10 @@ async fn run_describe(
     let short_id = &commit_id[..8.min(commit_id.len())];
     debug!(revision = %revision, commit_id = %short_id, "Resolved target revision");
 
-    if !commit.description().trim().is_empty() {
+    if !commit.description().trim().is_empty() && !force {
         bail!(
             "Revision {short_id} already has a description; refusing to overwrite. \
-             Use `jj describe` to edit it manually."
+             Use --force to overwrite, or `jj describe` to edit it manually."
         );
     }
 
