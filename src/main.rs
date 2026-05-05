@@ -584,7 +584,13 @@ fn get_commit_summaries(
         let commit = repo.store().get_commit(&commit_id)?;
         let desc = commit.description().trim();
         if !desc.is_empty() {
-            summaries.push(format!("- {}", desc.lines().next().unwrap_or("")));
+            let title = desc.lines().next().unwrap_or("");
+            let title = if title.chars().count() > 120 {
+                format!("{}...", &title[..title.char_indices().nth(120).map(|(i, _)| i).unwrap_or(title.len())])
+            } else {
+                title.to_string()
+            };
+            summaries.push(format!("- {title}"));
         }
     }
 
