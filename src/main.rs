@@ -913,7 +913,7 @@ fn format_box_with_title(title: &str, content: &str, width: usize) -> String {
     let mut result = String::new();
 
     // Top border with title: ╭─Title───...───╮
-    let remaining = width + 2 - title_width - 1; // -1 for the leading ─
+    let remaining = (width + 2).saturating_sub(title_width).saturating_sub(1); // -1 for the leading ─
     let border = "─".repeat(remaining);
     result.push_str(&format!(
         "{}{title}{}{}\n",
@@ -999,8 +999,24 @@ mod tests {
     #[test]
     fn test_format_box_with_title_fixed_width() {
         let result = format_box_with_title("Title", "Short", 72);
-        let first_line = result.lines().next().unwrap();
+        let first_line = result.lines().next().unwrap_or("");
         // width=72, plus 4 for borders and spaces = 76
         assert_eq!(first_line.width(), 76);
+    }
+
+    #[test]
+    fn test_format_box_with_title_empty_content() {
+        let result = format_box_with_title("Title", "", 72);
+        let first_line = result.lines().next().unwrap_or("");
+        assert!(first_line.contains("╭─Title"));
+        assert!(result.contains("╰"));
+    }
+
+    #[test]
+    fn test_format_box_with_title_long_title() {
+        let result = format_box_with_title("This is an extremely long title that exceeds the box width", "Short", 20);
+        // Should not panic; may have no border padding but still produce output
+        assert!(result.contains("╭─"));
+        assert!(result.contains("╮"));
     }
 }
