@@ -368,7 +368,14 @@ pub async fn get_tree_diff(
                     }
                 }
             }
-            _ => String::new(),
+            _ => {
+                if values.before.as_resolved().is_none() || values.after.as_resolved().is_none() {
+                    trace!(path = %path_str, "Conflicted file");
+                    format!("diff --git a/{path_str} b/{path_str}\n(conflicted file)\n")
+                } else {
+                    String::new()
+                }
+            }
         };
 
         if !diff_output.is_empty() {

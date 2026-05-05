@@ -736,7 +736,7 @@ async fn generate_diff(
 
     let collapse_matcher = build_collapse_matcher(&CONFIG.diff.collapse_patterns);
     let gitattr_matcher = load_gitattributes(workspace_root);
-    let TreeDiffResult { diff, collapsed_count } = get_tree_diff(
+    let TreeDiffResult { mut diff, collapsed_count } = get_tree_diff(
         repo,
         &parent_tree,
         &current_tree,
@@ -749,6 +749,12 @@ async fn generate_diff(
 
     if diff.trim().is_empty() {
         return Ok(None);
+    }
+
+    // Prepend merge notice for merge commits
+    let parent_count = commit.parent_ids().len();
+    if parent_count > 1 {
+        diff = format!("Merge commit ({parent_count} parents) - diff against first parent:\n\n{diff}");
     }
 
     let diff_lines = diff.lines().count();
