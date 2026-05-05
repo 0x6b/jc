@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt::Write, fs::read_to_string, path::Path};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use jj_lib::{
@@ -257,21 +257,14 @@ async fn buffer_diff_stream(
 enum EntryKind<'a> {
     Added { path: &'a RepoPath, path_str: &'a str, id: &'a FileId },
     Deleted { path: &'a RepoPath, path_str: &'a str, id: &'a FileId },
-    Modified {
-        path: &'a RepoPath,
-        path_str: &'a str,
-        before_id: &'a FileId,
-        after_id: &'a FileId,
-    },
+    Modified { path: &'a RepoPath, path_str: &'a str, before_id: &'a FileId, after_id: &'a FileId },
     Conflicted { path_str: &'a str },
     Skipped,
 }
 
-fn classify_entry<'a>(
-    entry: &'a TreeDiffEntry,
-) -> Result<EntryKind<'a>> {
+fn classify_entry<'a>(entry: &'a TreeDiffEntry) -> Result<EntryKind<'a>> {
     let path_str = entry.path.as_internal_file_string();
-    let values = entry.values.as_ref().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let values = entry.values.as_ref().map_err(|e| anyhow!("{e}"))?;
 
     match (values.before.as_resolved(), values.after.as_resolved()) {
         (Some(None), Some(Some(TreeValue::File { id, .. }))) => {
@@ -283,12 +276,7 @@ fn classify_entry<'a>(
         (
             Some(Some(TreeValue::File { id: before_id, .. })),
             Some(Some(TreeValue::File { id: after_id, .. })),
-        ) => Ok(EntryKind::Modified {
-            path: &entry.path,
-            path_str,
-            before_id,
-            after_id,
-        }),
+        ) => Ok(EntryKind::Modified { path: &entry.path, path_str, before_id, after_id }),
         _ => {
             if values.before.as_resolved().is_none() || values.after.as_resolved().is_none() {
                 Ok(EntryKind::Conflicted { path_str })
@@ -327,13 +315,12 @@ pub async fn get_tree_diff(
     // Match exact renames (added files whose ID matches a deleted file)
     let mut renamed = vec![false; entries.len()];
     for (i, kind) in classified.iter().enumerate() {
-        if let EntryKind::Added { id, .. } = kind {
-            if let Some(candidates) = deleted_by_id.get_mut(id) {
-                if let Some(deleted_idx) = candidates.pop() {
-                    renamed[i] = true;
-                    renamed[deleted_idx] = true;
-                }
-            }
+        if let EntryKind::Added { id, .. } = kind
+            && let Some(candidates) = deleted_by_id.get_mut(id)
+            && let Some(deleted_idx) = candidates.pop()
+        {
+            renamed[i] = true;
+            renamed[deleted_idx] = true;
         }
     }
 
@@ -348,18 +335,16 @@ pub async fn get_tree_diff(
         }
         if let EntryKind::Added { path_str, .. } = kind {
             for (j, other) in classified.iter().enumerate() {
-                if renamed[j] && j != i {
-                    if let EntryKind::Deleted {
-                        path_str: old_path, ..
-                    } = other
-                    {
-                        trace!(old = %old_path, new = %path_str, "Exact rename detected");
-                        file_count += 1;
-                        output.push_str(&format!(
+                if renamed[j]
+                    && j != i
+                    && let EntryKind::Deleted { path_str: old_path, .. } = other
+                {
+                    trace!(old = %old_path, new = %path_str, "Exact rename detected");
+                    file_count += 1;
+                    output.push_str(&format!(
                             "diff --git a/{old_path} b/{path_str}\nrename from {old_path}\nrename to {path_str}\n"
                         ));
-                        break;
-                    }
+                    break;
                 }
             }
         }
@@ -373,9 +358,7 @@ pub async fn get_tree_diff(
         let diff_output = match kind {
             EntryKind::Conflicted { path_str } => {
                 trace!(path = %path_str, "Conflicted file");
-                Some(format!(
-                    "diff --git a/{path_str} b/{path_str}\n(conflicted file)\n"
-                ))
+                Some(format!("diff --git a/{path_str} b/{path_str}\n(conflicted file)\n"))
             }
             EntryKind::Skipped => None,
             _ => {
@@ -408,9 +391,16 @@ pub async fn get_tree_diff(
                                 max_diff_lines,
                                 max_diff_bytes,
                             );
-                            Some(format_collapsed_summary(path_str, line_count, 0, "new file", reason))
+                            Some(format_collapsed_summary(
+                                path_str, line_count, 0, "new file", reason,
+                            ))
                         } else {
-                            Some(format_added_removed_diff(repo, path, path_str, id, true, MAX_LINES).await?)
+                            Some(
+                                format_added_removed_diff(
+                                    repo, path, path_str, id, true, MAX_LINES,
+                                )
+                                .await?,
+                            )
                         }
                     }
                     EntryKind::Deleted { path, id, .. } => {
@@ -430,24 +420,31 @@ pub async fn get_tree_diff(
                                 max_diff_lines,
                                 max_diff_bytes,
                             );
-                            Some(format_collapsed_summary(path_str, 0, line_count, "deleted file", reason))
+                            Some(format_collapsed_summary(
+                                path_str,
+                                0,
+                                line_count,
+                                "deleted file",
+                                reason,
+                            ))
                         } else {
-                            Some(format_added_removed_diff(repo, path, path_str, id, false, MAX_LINES).await?)
+                            Some(
+                                format_added_removed_diff(
+                                    repo, path, path_str, id, false, MAX_LINES,
+                                )
+                                .await?,
+                            )
                         }
                     }
-                    EntryKind::Modified {
-                        path,
-                        before_id,
-                        after_id,
-                        ..
-                    } => {
+                    EntryKind::Modified { path, before_id, after_id, .. } => {
                         let (before_content, after_content) = try_join!(
                             read_file_content(repo, path, before_id),
                             read_file_content(repo, path, after_id)
                         )?;
                         let byte_size = before_content.len().max(after_content.len());
 
-                        match (String::from_utf8(before_content), String::from_utf8(after_content)) {
+                        match (String::from_utf8(before_content), String::from_utf8(after_content))
+                        {
                             (Ok(before_text), Ok(after_text)) => {
                                 let diff = TextDiff::from_lines(&before_text, &after_text);
                                 let added = diff
@@ -471,20 +468,25 @@ pub async fn get_tree_diff(
                                         max_diff_lines,
                                         max_diff_bytes,
                                     );
-                                    Some(format_collapsed_summary(path_str, added, removed, "modified", reason))
+                                    Some(format_collapsed_summary(
+                                        path_str, added, removed, "modified", reason,
+                                    ))
                                 } else {
                                     Some(format!(
                                         "diff --git a/{0} b/{0}\n{1}",
                                         path_str,
-                                        diff.unified_diff()
-                                            .context_radius(CONTEXT_LINES)
-                                            .header(&format!("a/{path_str}"), &format!("b/{path_str}"))
+                                        diff.unified_diff().context_radius(CONTEXT_LINES).header(
+                                            &format!("a/{path_str}"),
+                                            &format!("b/{path_str}")
+                                        )
                                     ))
                                 }
                             }
                             _ => {
                                 trace!(path = %path_str, "Binary file modified");
-                                Some(format!("diff --git a/{path_str} b/{path_str}\n(binary file modified)\n"))
+                                Some(format!(
+                                    "diff --git a/{path_str} b/{path_str}\n(binary file modified)\n"
+                                ))
                             }
                         }
                     }
@@ -493,11 +495,11 @@ pub async fn get_tree_diff(
             }
         };
 
-        if let Some(diff) = diff_output {
-            if !diff.is_empty() {
-                file_count += 1;
-                output.push_str(&diff);
-            }
+        if let Some(diff) = diff_output
+            && !diff.is_empty()
+        {
+            file_count += 1;
+            output.push_str(&diff);
         }
     }
 

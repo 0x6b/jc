@@ -132,7 +132,11 @@ enum Commands {
 
 impl Default for Commands {
     fn default() -> Self {
-        Commands::Commit { language: "English".to_string(), force: false, dry_run: false }
+        Commands::Commit {
+            language: "English".to_string(),
+            force: false,
+            dry_run: false,
+        }
     }
 }
 
@@ -604,7 +608,10 @@ fn get_commit_summaries(
         if !desc.is_empty() {
             let title = desc.lines().next().unwrap_or("");
             let title = if title.chars().count() > 120 {
-                format!("{}...", &title[..title.char_indices().nth(120).map(|(i, _)| i).unwrap_or(title.len())])
+                format!(
+                    "{}...",
+                    &title[..title.char_indices().nth(120).map(|(i, _)| i).unwrap_or(title.len())]
+                )
             } else {
                 title.to_string()
             };
@@ -754,7 +761,8 @@ async fn generate_diff(
     // Prepend merge notice for merge commits
     let parent_count = commit.parent_ids().len();
     if parent_count > 1 {
-        diff = format!("Merge commit ({parent_count} parents) - diff against first parent:\n\n{diff}");
+        diff =
+            format!("Merge commit ({parent_count} parents) - diff against first parent:\n\n{diff}");
     }
 
     let diff_lines = diff.lines().count();
@@ -782,7 +790,13 @@ async fn generate_message(diff: &str, language: &str, model: &str) -> Result<Str
     }
 }
 
-async fn run_commit(workspace: &Workspace, language: &str, model: &str, force: bool, dry_run: bool) -> Result<()> {
+async fn run_commit(
+    workspace: &Workspace,
+    language: &str,
+    model: &str,
+    force: bool,
+    dry_run: bool,
+) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
 
@@ -805,13 +819,14 @@ async fn run_commit(workspace: &Workspace, language: &str, model: &str, force: b
         .context("workspace should have a working-copy commit")?;
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
 
-    let (diff, collapsed_count) = match generate_diff(&repo, &wc_commit, workspace.workspace_root()).await? {
-        Some(result) => result,
-        None => {
-            println!("No changes detected, nothing to commit");
-            return Ok(());
-        }
-    };
+    let (diff, collapsed_count) =
+        match generate_diff(&repo, &wc_commit, workspace.workspace_root()).await? {
+            Some(result) => result,
+            None => {
+                println!("No changes detected, nothing to commit");
+                return Ok(());
+            }
+        };
 
     if collapsed_count > 0 {
         eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
@@ -861,13 +876,14 @@ async fn run_describe(
         );
     }
 
-    let (diff, collapsed_count) = match generate_diff(&repo, &commit, workspace.workspace_root()).await? {
-        Some(result) => result,
-        None => {
-            println!("No changes in revision {short_id}, nothing to describe");
-            return Ok(());
-        }
-    };
+    let (diff, collapsed_count) =
+        match generate_diff(&repo, &commit, workspace.workspace_root()).await? {
+            Some(result) => result,
+            None => {
+                println!("No changes in revision {short_id}, nothing to describe");
+                return Ok(());
+            }
+        };
 
     if collapsed_count > 0 {
         eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
@@ -1025,7 +1041,11 @@ mod tests {
 
     #[test]
     fn test_format_box_with_title_long_title() {
-        let result = format_box_with_title("This is an extremely long title that exceeds the box width", "Short", 20);
+        let result = format_box_with_title(
+            "This is an extremely long title that exceeds the box width",
+            "Short",
+            20,
+        );
         // Should not panic; may have no border padding but still produce output
         let plain = strip_ansi_codes(&result);
         assert!(plain.contains("╭─"));
