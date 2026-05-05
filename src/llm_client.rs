@@ -2,7 +2,7 @@ use std::{io::Error, process::Stdio, time::Duration};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_json::{Value, from_str};
-use tokio::{io::AsyncWriteExt, process::Command, spawn};
+use tokio::{io::AsyncWriteExt, process::Command, spawn, time::timeout};
 use tracing::{debug, trace, warn};
 
 use crate::config::GeneratorConfig;
@@ -101,8 +101,16 @@ pub async fn invoke(request: &LlmRequest<'_>) -> Option<String> {
         Ok::<_, Error>(())
     });
 
-    // Concurrently read stdout/stderr and wait for exit
-    let output = child.wait_with_output().await;
+    // Concurrently read stdout/stderr and wait for exit (with 2-minute timeout)
+    let output = match timeout(Duration::from_secs(120), child.wait_with_output()).await {
+        Ok(result) => result,
+        Err(_) => {
+            warn!("LLM CLI timed out after 120 seconds");
+            stdin_task.abort();
+            spinner.finish_and_clear();
+            return None;
+        }
+    };
 
     // Check stdin write result
     match stdin_task.await {
