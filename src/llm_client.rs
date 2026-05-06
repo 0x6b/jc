@@ -102,14 +102,11 @@ pub async fn invoke(request: &LlmRequest<'_>) -> Option<String> {
     });
 
     // Concurrently read stdout/stderr and wait for exit (with 2-minute timeout)
-    let output = match timeout(Duration::from_secs(120), child.wait_with_output()).await {
-        Ok(result) => result,
-        Err(_) => {
-            warn!("LLM CLI timed out after 120 seconds");
-            stdin_task.abort();
-            spinner.finish_and_clear();
-            return None;
-        }
+    let Ok(output) = timeout(Duration::from_secs(120), child.wait_with_output()).await else {
+        warn!("LLM CLI timed out after 120 seconds");
+        stdin_task.abort();
+        spinner.finish_and_clear();
+        return None;
     };
 
     // Check stdin write result
@@ -176,7 +173,7 @@ fn parse_result_text(raw_output: &str) -> Option<String> {
         if let Some(result_obj) = result_obj
             && result_obj.get("type").and_then(|v| v.as_str()) == Some("result")
         {
-            if result_obj.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+            if result_obj.get("is_error").and_then(Value::as_bool) == Some(true) {
                 let error_text = result_obj
                     .get("result")
                     .and_then(|v| v.as_str())

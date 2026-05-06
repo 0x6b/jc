@@ -6,8 +6,10 @@ mod llm_client;
 mod text_formatter;
 
 use std::{
+    borrow::ToOwned,
     collections::{HashMap, HashSet},
     env::{current_dir, var, vars},
+    fmt::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -35,6 +37,7 @@ use jj_lib::{
     git::{GitImportOptions, export_refs, import_refs},
     gitignore::GitIgnoreFile,
     id_prefix::IdPrefixContext,
+    matchers::{EverythingMatcher, NothingMatcher},
     merged_tree::MergedTree,
     object_id::ObjectId,
     op_store::RefTarget,
@@ -50,7 +53,7 @@ use jj_lib::{
     working_copy::SnapshotOptions,
     workspace::{Workspace, default_working_copy_factories},
 };
-use tracing::{debug, info, warn};
+use tracing::{Level, debug, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 use unicode_width::UnicodeWidthStr;
 
@@ -260,7 +263,7 @@ fn find_workspace(start_dir: &Path) -> Result<Workspace> {
     }
 
     // Resolve conditional scopes (e.g., --when.repositories)
-    let hostname = gethostname().to_str().map(|s| s.to_owned()).unwrap_or_default();
+    let hostname = gethostname().to_str().map(ToOwned::to_owned).unwrap_or_default();
     let home_dir = home_dir();
     let context = ConfigResolutionContext {
         home_dir: home_dir.as_deref(),
@@ -349,7 +352,7 @@ async fn create_commit(
 #[tokio::main]
 async fn main() -> Result<()> {
     fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::WARN.into()))
+        .with_env_filter(EnvFilter::from_default_env().add_directive(Level::WARN.into()))
         .init();
 
     let args = Args::parse();
@@ -446,9 +449,8 @@ async fn run_bookmark(
 
     info!(model = %model, backend = %config::backend(), "Generating bookmark name");
     let generator = BookmarkGenerator::new(model);
-    let bookmark_name = match generator.generate(&commit_summaries).await {
-        Some(name) => name,
-        None => bail!("Failed to generate bookmark name"),
+    let Some(bookmark_name) = generator.generate(&commit_summaries).await else {
+        bail!("Failed to generate bookmark name")
     };
 
     let final_name = match &prefix {
@@ -610,7 +612,7 @@ fn get_commit_summaries(
             let title = if title.chars().count() > 120 {
                 format!(
                     "{}...",
-                    &title[..title.char_indices().nth(120).map(|(i, _)| i).unwrap_or(title.len())]
+                    &title[..title.char_indices().nth(120).map_or(title.len(), |(i, _)| i)]
                 )
             } else {
                 title.to_string()
@@ -692,8 +694,8 @@ async fn snapshot_working_copy(
     let snapshot_options = SnapshotOptions {
         base_ignores,
         progress: None,
-        start_tracking_matcher: &jj_lib::matchers::EverythingMatcher,
-        force_tracking_matcher: &jj_lib::matchers::NothingMatcher,
+        start_tracking_matcher: &EverythingMatcher,
+        force_tracking_matcher: &NothingMatcher,
         max_new_file_size: 1024 * 1024 * 100,
     };
     let (new_tree, _stats) = locked_wc.snapshot(&snapshot_options).await?;
@@ -819,14 +821,12 @@ async fn run_commit(
         .context("workspace should have a working-copy commit")?;
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
 
-    let (diff, collapsed_count) =
-        match generate_diff(&repo, &wc_commit, workspace.workspace_root()).await? {
-            Some(result) => result,
-            None => {
-                println!("No changes detected, nothing to commit");
-                return Ok(());
-            }
-        };
+    let Some((diff, collapsed_count)) =
+        generate_diff(&repo, &wc_commit, workspace.workspace_root()).await?
+    else {
+        println!("No changes detected, nothing to commit");
+        return Ok(());
+    };
 
     if collapsed_count > 0 {
         eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
@@ -876,14 +876,12 @@ async fn run_describe(
         );
     }
 
-    let (diff, collapsed_count) =
-        match generate_diff(&repo, &commit, workspace.workspace_root()).await? {
-            Some(result) => result,
-            None => {
-                println!("No changes in revision {short_id}, nothing to describe");
-                return Ok(());
-            }
-        };
+    let Some((diff, collapsed_count)) =
+        generate_diff(&repo, &commit, workspace.workspace_root()).await?
+    else {
+        println!("No changes in revision {short_id}, nothing to describe");
+        return Ok(());
+    };
 
     if collapsed_count > 0 {
         eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
@@ -915,7 +913,7 @@ async fn run_describe(
         "Described change ".white().dimmed(),
         short_id.blue().dimmed(),
         if revision == "@" {
-            "".to_string()
+            String::new()
         } else {
             format!("({revision})").white().dimmed().to_string()
         },
@@ -937,33 +935,36 @@ fn format_box_with_title(title: &str, content: &str, width: usize) -> String {
     // Top border with title: ╭─Title───...───╮
     let remaining = (width + 2).saturating_sub(title_width).saturating_sub(1); // -1 for the leading ─
     let border = "─".repeat(remaining);
-    result.push_str(&format!(
-        "{}{title}{}{}\n",
+    let _ = writeln!(
+        result,
+        "{}{title}{}{}",
         "╭─".white().dimmed(),
         border.white().dimmed(),
         "╮".white().dimmed()
-    ));
+    );
 
     for line in &lines {
         let line_width = line.width();
         if line_width <= width {
             let padding = width - line_width;
-            result.push_str(&format!(
-                "{} {line}{} {}\n",
+            let _ = writeln!(
+                result,
+                "{} {line}{} {}",
                 "│".white().dimmed(),
                 " ".repeat(padding),
                 "│".white().dimmed()
-            ));
+            );
         } else {
-            result.push_str(&format!("{} {line} {}\n", "│".white().dimmed(), "│".white().dimmed()));
+            let _ = writeln!(result, "{} {line} {}", "│".white().dimmed(), "│".white().dimmed());
         }
     }
-    result.push_str(&format!(
-        "{}{}{}\n",
+    let _ = writeln!(
+        result,
+        "{}{}{}",
         "╰".white().dimmed(),
         "─".repeat(width + 2).white().dimmed(),
         "╯".white().dimmed()
-    ));
+    );
     result
 }
 

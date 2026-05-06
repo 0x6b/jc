@@ -4,12 +4,13 @@ use anyhow::{Result, anyhow};
 use futures::StreamExt;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use jj_lib::{
-    backend::{FileId, TreeValue},
+    backend::{FileId, TreeValue::File},
+    matchers::EverythingMatcher,
     merged_tree::{MergedTree, TreeDiffEntry},
     repo::{ReadonlyRepo, Repo},
     repo_path::RepoPath,
 };
-use similar::TextDiff;
+use similar::{ChangeTag, TextDiff};
 use tokio::{io::AsyncReadExt, try_join};
 use tracing::{debug, trace, warn};
 
@@ -93,9 +94,8 @@ pub fn load_gitattributes(workspace_root: &Path) -> Option<GitAttrMatcher> {
 
         // Format: <pattern> <attr1> <attr2> ...
         let mut parts = line.split_whitespace();
-        let pattern = match parts.next() {
-            Some(p) => p,
-            None => continue,
+        let Some(pattern) = parts.next() else {
+            continue;
         };
 
         let mut reason: Option<&'static str> = None;
@@ -245,7 +245,7 @@ async fn buffer_diff_stream(
     from_tree: &MergedTree,
     to_tree: &MergedTree,
 ) -> Result<Vec<TreeDiffEntry>> {
-    let mut stream = from_tree.diff_stream(to_tree, &jj_lib::matchers::EverythingMatcher);
+    let mut stream = from_tree.diff_stream(to_tree, &EverythingMatcher);
     let mut entries = Vec::new();
     while let Some(entry) = stream.next().await {
         entries.push(entry);
@@ -267,16 +267,15 @@ fn classify_entry<'a>(entry: &'a TreeDiffEntry) -> Result<EntryKind<'a>> {
     let values = entry.values.as_ref().map_err(|e| anyhow!("{e}"))?;
 
     match (values.before.as_resolved(), values.after.as_resolved()) {
-        (Some(None), Some(Some(TreeValue::File { id, .. }))) => {
+        (Some(None), Some(Some(File { id, .. }))) => {
             Ok(EntryKind::Added { path: &entry.path, path_str, id })
         }
-        (Some(Some(TreeValue::File { id, .. })), Some(None)) => {
+        (Some(Some(File { id, .. })), Some(None)) => {
             Ok(EntryKind::Deleted { path: &entry.path, path_str, id })
         }
-        (
-            Some(Some(TreeValue::File { id: before_id, .. })),
-            Some(Some(TreeValue::File { id: after_id, .. })),
-        ) => Ok(EntryKind::Modified { path: &entry.path, path_str, before_id, after_id }),
+        (Some(Some(File { id: before_id, .. })), Some(Some(File { id: after_id, .. }))) => {
+            Ok(EntryKind::Modified { path: &entry.path, path_str, before_id, after_id })
+        }
         _ => {
             if values.before.as_resolved().is_none() || values.after.as_resolved().is_none() {
                 Ok(EntryKind::Conflicted { path_str })
@@ -341,9 +340,10 @@ pub async fn get_tree_diff(
                 {
                     trace!(old = %old_path, new = %path_str, "Exact rename detected");
                     file_count += 1;
-                    output.push_str(&format!(
-                            "diff --git a/{old_path} b/{path_str}\nrename from {old_path}\nrename to {path_str}\n"
-                        ));
+                    let _ = write!(
+                        output,
+                        "diff --git a/{old_path} b/{path_str}\nrename from {old_path}\nrename to {path_str}\n"
+                    );
                     break;
                 }
             }
@@ -370,7 +370,7 @@ pub async fn get_tree_diff(
                 };
                 let gitattr_reason = gitattr_matcher.and_then(|m| m.collapse_reason(path_str));
                 let should_collapse_pattern =
-                    collapse_matcher.map(|m| m.is_match(path_str)).unwrap_or(false);
+                    collapse_matcher.is_some_and(|m| m.is_match(path_str));
                 let should_collapse = gitattr_reason.is_some() || should_collapse_pattern;
 
                 match kind {
@@ -443,51 +443,48 @@ pub async fn get_tree_diff(
                         )?;
                         let byte_size = before_content.len().max(after_content.len());
 
-                        match (String::from_utf8(before_content), String::from_utf8(after_content))
+                        if let (Ok(before_text), Ok(after_text)) =
+                            (String::from_utf8(before_content), String::from_utf8(after_content))
                         {
-                            (Ok(before_text), Ok(after_text)) => {
-                                let diff = TextDiff::from_lines(&before_text, &after_text);
-                                let added = diff
-                                    .iter_all_changes()
-                                    .filter(|c| c.tag() == similar::ChangeTag::Insert)
-                                    .count();
-                                let removed = diff
-                                    .iter_all_changes()
-                                    .filter(|c| c.tag() == similar::ChangeTag::Delete)
-                                    .count();
-                                let should_collapse_size =
-                                    added + removed > max_diff_lines || byte_size > max_diff_bytes;
-                                trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = added + removed, bytes = byte_size, "Processing modified file");
-                                if should_collapse || should_collapse_size {
-                                    collapsed_count += 1;
-                                    let reason = collapse_reason(
-                                        gitattr_reason,
-                                        should_collapse,
-                                        added + removed,
-                                        byte_size,
-                                        max_diff_lines,
-                                        max_diff_bytes,
-                                    );
-                                    Some(format_collapsed_summary(
-                                        path_str, added, removed, "modified", reason,
-                                    ))
-                                } else {
-                                    Some(format!(
-                                        "diff --git a/{0} b/{0}\n{1}",
-                                        path_str,
-                                        diff.unified_diff().context_radius(CONTEXT_LINES).header(
-                                            &format!("a/{path_str}"),
-                                            &format!("b/{path_str}")
-                                        )
-                                    ))
-                                }
-                            }
-                            _ => {
-                                trace!(path = %path_str, "Binary file modified");
+                            let diff = TextDiff::from_lines(&before_text, &after_text);
+                            let added = diff
+                                .iter_all_changes()
+                                .filter(|c| c.tag() == ChangeTag::Insert)
+                                .count();
+                            let removed = diff
+                                .iter_all_changes()
+                                .filter(|c| c.tag() == ChangeTag::Delete)
+                                .count();
+                            let should_collapse_size =
+                                added + removed > max_diff_lines || byte_size > max_diff_bytes;
+                            trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = added + removed, bytes = byte_size, "Processing modified file");
+                            if should_collapse || should_collapse_size {
+                                collapsed_count += 1;
+                                let reason = collapse_reason(
+                                    gitattr_reason,
+                                    should_collapse,
+                                    added + removed,
+                                    byte_size,
+                                    max_diff_lines,
+                                    max_diff_bytes,
+                                );
+                                Some(format_collapsed_summary(
+                                    path_str, added, removed, "modified", reason,
+                                ))
+                            } else {
                                 Some(format!(
-                                    "diff --git a/{path_str} b/{path_str}\n(binary file modified)\n"
+                                    "diff --git a/{0} b/{0}\n{1}",
+                                    path_str,
+                                    diff.unified_diff()
+                                        .context_radius(CONTEXT_LINES)
+                                        .header(&format!("a/{path_str}"), &format!("b/{path_str}"))
                                 ))
                             }
+                        } else {
+                            trace!(path = %path_str, "Binary file modified");
+                            Some(format!(
+                                "diff --git a/{path_str} b/{path_str}\n(binary file modified)\n"
+                            ))
                         }
                     }
                     _ => unreachable!(),
@@ -513,26 +510,25 @@ pub async fn get_file_change_summary(
     to_tree: &MergedTree,
 ) -> FileChangeSummary {
     let mut summary = FileChangeSummary::default();
-    let mut stream = from_tree.diff_stream(to_tree, &jj_lib::matchers::EverythingMatcher);
+    let mut stream = from_tree.diff_stream(to_tree, &EverythingMatcher);
 
     while let Some(entry) = stream.next().await {
         let path_str = entry.path.as_internal_file_string().to_string();
-        let values = match entry.values {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Ok(values) = entry.values else {
+            continue;
         };
 
         match (values.before.as_resolved(), values.after.as_resolved()) {
             // Added: before is None, after is Some
-            (Some(None), Some(Some(TreeValue::File { .. }))) => {
+            (Some(None), Some(Some(File { .. }))) => {
                 summary.added.push(path_str);
             }
             // Deleted: before is Some, after is None
-            (Some(Some(TreeValue::File { .. })), Some(None)) => {
+            (Some(Some(File { .. })), Some(None)) => {
                 summary.deleted.push(path_str);
             }
             // Modified: both before and after are Some
-            (Some(Some(TreeValue::File { .. })), Some(Some(TreeValue::File { .. }))) => {
+            (Some(Some(File { .. })), Some(Some(File { .. }))) => {
                 summary.modified.push(path_str);
             }
             _ => {}
