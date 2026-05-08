@@ -524,7 +524,7 @@ fn resolve_bookmark_target(
     }
 }
 
-const DEFAULT_BASE_BRANCHES: &[&str] = &["main", "master", "trunk", "develop"];
+const DEFAULT_BASE_BRANCHES: &[&str] = &["develop", "main", "master", "trunk"];
 
 fn find_default_base(repo: &Arc<ReadonlyRepo>) -> Result<String> {
     let view = repo.view();
