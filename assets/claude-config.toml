@@ -6,6 +6,8 @@ default_commit_message = "chore: update changes"
 
 [bookmark]
 prompt_template = """
+OUTPUT ONLY THE BOOKMARK NAME. NO EXPLANATIONS.
+
 Generate a short, descriptive bookmark (branch) name for the following commits.
 
 Rules:
@@ -19,8 +21,6 @@ Rules:
 
 Commits:
 {commit_summaries}
-
-OUTPUT ONLY THE BOOKMARK NAME. NO EXPLANATIONS.
 """
 
 [diff]
@@ -53,6 +53,8 @@ collapse_patterns = [
 
 [prompt]
 template = """
+OUTPUT ONLY THE COMMIT MESSAGE. NO EXPLANATIONS, NO COMMENTARY, NO MARKDOWN CODE BLOCKS.
+
 Generate a Conventional Commit message in {language} for the following diff.
 
 Conventional Commits Format:
@@ -74,8 +76,6 @@ Guidelines:
     - Include body only if motivation/context isn't obvious from the title
     - Use bullet points for multiple changes or breaking changes
     - For breaking changes, explain migration path in footer with "BREAKING CHANGE:" prefix
-
-OUTPUT ONLY THE COMMIT MESSAGE. NO EXPLANATIONS, NO COMMENTARY, NO MARKDOWN CODE BLOCKS.
 
 Diff:
 
