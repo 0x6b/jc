@@ -5,7 +5,7 @@ use tracing::{debug, error, trace, warn};
 
 use crate::{
     config::{CONFIG, backend},
-    llm_client::{LlmRequest, invoke},
+    llm_client::{LlmRequest, RETRY_EMPHASIS, invoke},
     text_formatter::format_text,
 };
 
@@ -27,25 +27,39 @@ impl<'a> CommitMessageGenerator<'a> {
 
     pub async fn generate(&self, diff_content: &str) -> Option<String> {
         debug!(diff_len = diff_content.len(), "Starting commit message generation");
-        self.try_generate(diff_content).await.map(|message| {
-            let first_line = message.lines().next().unwrap_or("").trim();
-            let message = if CONVENTIONAL_COMMIT_RE.is_match(first_line) {
-                debug!("Generated message follows conventional commit format");
-                message
-            } else {
-                error!(first_line = %first_line, "Generated message does not follow conventional commit format, prepending default");
-                format!("{}\n\n{message}", CONFIG.generator.default_commit_message)
+        // Try once normally; if the output fails the format check, retry once with an
+        // emphasized prompt. If still malformed, fall back to prepending the default title.
+        let mut last_message = None;
+        for emphasize in [false, true] {
+            if emphasize {
+                debug!("Retrying commit message generation with emphasized prompt");
+            }
+            let Some(message) = self.try_generate(diff_content, emphasize).await else {
+                continue;
             };
-            format_text(&message, 72)
+            let first_line = message.lines().next().unwrap_or("").trim();
+            if CONVENTIONAL_COMMIT_RE.is_match(first_line) {
+                debug!("Generated message follows conventional commit format");
+                return Some(format_text(&message, 72));
+            }
+            warn!(first_line = %first_line, emphasize, "Generated message does not follow conventional commit format");
+            last_message = Some(message);
+        }
+        last_message.map(|message| {
+            error!("Message still malformed after retry, prepending default");
+            format_text(&format!("{}\n\n{message}", CONFIG.generator.default_commit_message), 72)
         })
     }
 
-    async fn try_generate(&self, diff_content: &str) -> Option<String> {
-        let prompt = CONFIG
+    async fn try_generate(&self, diff_content: &str, emphasize: bool) -> Option<String> {
+        let mut prompt = CONFIG
             .prompt
             .template
             .replace("{language}", self.language)
             .replace("{diff_content}", diff_content);
+        if emphasize {
+            prompt.insert_str(0, RETRY_EMPHASIS);
+        }
         trace!(prompt_len = prompt.len(), "Prepared prompt");
 
         let spinner = format!("Generating commit message with {}...", backend());

@@ -5,7 +5,7 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     config::{CONFIG, backend},
-    llm_client::{LlmRequest, invoke},
+    llm_client::{LlmRequest, RETRY_EMPHASIS, invoke},
 };
 
 static VALID_BOOKMARK_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -23,23 +23,33 @@ impl<'a> BookmarkGenerator<'a> {
 
     pub async fn generate(&self, commit_summaries: &str) -> Option<String> {
         debug!(summaries_len = commit_summaries.len(), "Starting bookmark name generation");
-        self.try_generate(commit_summaries).await.and_then(|name| {
+        // Try once normally; if the output contains prose and fails the format check,
+        // retry once with an emphasized prompt, then give up.
+        for emphasize in [false, true] {
+            if emphasize {
+                debug!("Retrying bookmark generation with emphasized prompt");
+            }
+            let Some(name) = self.try_generate(commit_summaries, emphasize).await else {
+                continue;
+            };
             let name = name.trim().to_lowercase();
             if VALID_BOOKMARK_RE.is_match(&name) {
                 debug!(bookmark = %name, "Generated valid bookmark name");
-                Some(name)
-            } else {
-                warn!(bookmark = %name, "Generated bookmark name doesn't match expected format");
-                None
+                return Some(name);
             }
-        })
+            warn!(bookmark = %name, emphasize, "Generated bookmark name doesn't match expected format");
+        }
+        None
     }
 
-    async fn try_generate(&self, commit_summaries: &str) -> Option<String> {
-        let prompt = CONFIG
+    async fn try_generate(&self, commit_summaries: &str, emphasize: bool) -> Option<String> {
+        let mut prompt = CONFIG
             .bookmark
             .prompt_template
             .replace("{commit_summaries}", commit_summaries);
+        if emphasize {
+            prompt.insert_str(0, RETRY_EMPHASIS);
+        }
         trace!(prompt_len = prompt.len(), "Prepared prompt");
 
         let spinner = format!("Generating bookmark name with {}...", backend());

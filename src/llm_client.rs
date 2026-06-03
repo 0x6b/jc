@@ -7,6 +7,9 @@ use tracing::{debug, trace, warn};
 
 use crate::config::GeneratorConfig;
 
+/// Prepended to the prompt on a retry attempt when the first output contained extra text.
+pub const RETRY_EMPHASIS: &str = "DO NOT ADD any prose, reasoning, or commentary. Your previous response included extra text and was rejected. Respond with ONLY the requested output, nothing before or after.\n\n";
+
 /// Configuration for LLM CLI invocation
 pub struct LlmRequest<'a> {
     pub command: &'a str,
