@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fmt::Write, fs::read_to_string, path::Path};
 
 use anyhow::{Result, anyhow};
-use futures::StreamExt;
+use futures::{AsyncReadExt, StreamExt};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use jj_lib::{
     backend::{FileId, TreeValue::File},
@@ -11,7 +11,7 @@ use jj_lib::{
     repo_path::RepoPath,
 };
 use similar::{ChangeTag, TextDiff};
-use tokio::{io::AsyncReadExt, try_join};
+use tokio::try_join;
 use tracing::{debug, trace, warn};
 
 /// Summary of file changes between two trees

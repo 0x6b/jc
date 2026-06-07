@@ -28,6 +28,7 @@ use diff::{
     get_tree_diff, load_gitattributes,
 };
 use dirs::{config_dir, home_dir};
+use futures::TryStreamExt;
 use gethostname::gethostname;
 use jj_lib::{
     backend::CommitId,
@@ -43,7 +44,7 @@ use jj_lib::{
     op_store::RefTarget,
     ref_name::{RefName, RemoteName},
     repo::{ReadonlyRepo, Repo, StoreFactories},
-    repo_path::RepoPathUiConverter::Fs,
+    repo_path::{RepoPath, RepoPathUiConverter::Fs},
     revset::{
         RevsetAliasesMap, RevsetDiagnostics, RevsetExpression, RevsetExtensions,
         RevsetParseContext, RevsetWorkspaceContext, SymbolResolver, parse,
@@ -173,13 +174,15 @@ fn load_base_ignores(workspace_root: &Path) -> Result<Arc<GitIgnoreFile>> {
 
     if let Some(excludes_path) = global_excludes {
         // Chain the global excludes file (ignore errors if file doesn't exist)
-        git_ignores = git_ignores.chain_with_file("", excludes_path).unwrap_or(git_ignores);
+        git_ignores = git_ignores
+            .chain_with_file(RepoPath::root(), excludes_path)
+            .unwrap_or(git_ignores);
     }
 
     // Load workspace root .gitignore
     let workspace_gitignore = workspace_root.join(".gitignore");
     git_ignores = git_ignores
-        .chain_with_file("", workspace_gitignore)
+        .chain_with_file(RepoPath::root(), workspace_gitignore)
         .unwrap_or(git_ignores);
 
     Ok(git_ignores)
@@ -326,7 +329,7 @@ async fn create_commit(
     let new_repo = tx.commit("auto-commit via jc").await?;
 
     // Finish the working copy with the new state
-    let locked_wc = workspace.working_copy().start_mutation()?;
+    let locked_wc = workspace.working_copy().start_mutation().await?;
     locked_wc.finish(new_repo.operation().id().clone()).await?;
 
     let author = commit_with_description.author();
@@ -407,12 +410,12 @@ async fn run_bookmark(
     };
 
     // Resolve target revision, skipping empty @ if needed
-    let effective_to = resolve_bookmark_target(&repo, workspace, to)?;
-    let target_commit = resolve_single_commit(&repo, workspace, &effective_to)?;
+    let effective_to = resolve_bookmark_target(&repo, workspace, to).await?;
+    let target_commit = resolve_single_commit(&repo, workspace, &effective_to).await?;
 
     // Check if any commit in the range already has a bookmark - if so, move it
     if let Some(existing_name) =
-        find_existing_bookmark_in_range(&repo, workspace, &from_rev, &effective_to)?
+        find_existing_bookmark_in_range(&repo, workspace, &from_rev, &effective_to).await?
     {
         let final_name = match &prefix {
             Some(p) if !existing_name.starts_with(&format!("{p}/")) => {
@@ -441,7 +444,7 @@ async fn run_bookmark(
     // No existing bookmark - generate a new name
     info!(from = %from_rev, to = %effective_to, "Resolving revset range");
 
-    let commit_summaries = get_commit_summaries(&repo, workspace, &from_rev, &effective_to)?;
+    let commit_summaries = get_commit_summaries(&repo, workspace, &from_rev, &effective_to).await?;
     if commit_summaries.is_empty() {
         bail!("No commits found between {from_rev} and {effective_to}");
     }
@@ -476,15 +479,17 @@ async fn run_bookmark(
 }
 
 /// Find an existing local bookmark anywhere in the given revset range
-fn find_existing_bookmark_in_range(
+async fn find_existing_bookmark_in_range(
     repo: &Arc<ReadonlyRepo>,
     workspace: &Workspace,
     from: &str,
     to: &str,
 ) -> Result<Option<String>> {
     let revset_str = format!("{from}..{to}");
-    let commit_ids: HashSet<_> =
-        evaluate_revset(repo, workspace, &revset_str)?.into_iter().collect();
+    let commit_ids: HashSet<_> = evaluate_revset(repo, workspace, &revset_str)
+        .await?
+        .into_iter()
+        .collect();
 
     for (name, target) in repo.view().local_bookmarks() {
         if target.added_ids().any(|id| commit_ids.contains(id)) {
@@ -495,7 +500,7 @@ fn find_existing_bookmark_in_range(
 }
 
 /// Resolve bookmark target, using @- if @ is empty (idiomatic jj behavior)
-fn resolve_bookmark_target(
+async fn resolve_bookmark_target(
     repo: &Arc<ReadonlyRepo>,
     workspace: &Workspace,
     to: &str,
@@ -504,7 +509,7 @@ fn resolve_bookmark_target(
         return Ok(to.to_string());
     }
 
-    let commit = resolve_single_commit(repo, workspace, "@")?;
+    let commit = resolve_single_commit(repo, workspace, "@").await?;
 
     // Check if @ is empty (no description and tree matches parent)
     let is_empty = commit.description().is_empty() && {
@@ -554,7 +559,7 @@ fn find_default_base(repo: &Arc<ReadonlyRepo>) -> Result<String> {
 }
 
 /// Evaluate a revset expression and return the matching commit IDs.
-fn evaluate_revset(
+async fn evaluate_revset(
     repo: &Arc<ReadonlyRepo>,
     workspace: &Workspace,
     revset_str: &str,
@@ -591,17 +596,17 @@ fn evaluate_revset(
         .with_id_prefix_context(&id_prefix_context);
     let resolved = expression.resolve_user_expression(repo.as_ref(), &symbol_resolver)?;
     let revset = resolved.evaluate(repo.as_ref())?;
-    revset.iter().collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    revset.stream().try_collect::<Vec<_>>().await.map_err(Into::into)
 }
 
-fn get_commit_summaries(
+async fn get_commit_summaries(
     repo: &Arc<ReadonlyRepo>,
     workspace: &Workspace,
     from: &str,
     to: &str,
 ) -> Result<String> {
     let revset_str = format!("{from}..{to}");
-    let commit_ids = evaluate_revset(repo, workspace, &revset_str)?;
+    let commit_ids = evaluate_revset(repo, workspace, &revset_str).await?;
 
     let mut summaries = Vec::new();
     for commit_id in commit_ids {
@@ -624,12 +629,12 @@ fn get_commit_summaries(
     Ok(summaries.join("\n"))
 }
 
-fn resolve_single_commit(
+async fn resolve_single_commit(
     repo: &Arc<ReadonlyRepo>,
     workspace: &Workspace,
     rev: &str,
 ) -> Result<Commit> {
-    match evaluate_revset(repo, workspace, rev)?.as_slice() {
+    match evaluate_revset(repo, workspace, rev).await?.as_slice() {
         [id] => repo.store().get_commit(id).map_err(Into::into),
         [] => bail!("Revset resolved to no commits"),
         _ => bail!("Revset '{rev}' resolved to multiple commits, expected single commit"),
@@ -647,8 +652,8 @@ async fn set_bookmark(repo: &Arc<ReadonlyRepo>, name: &str, commit: &Commit) -> 
 
     // Import git refs first to sync state (prevents compare-and-swap failures)
     let import_options = GitImportOptions {
-        auto_local_bookmark: false,
         abandon_unreachable_commits: true,
+        record_synthetic_predecessors: false,
         remote_auto_track_bookmarks: HashMap::new(),
     };
     if let Err(e) = import_refs(mut_repo, &import_options).await {
@@ -689,7 +694,7 @@ async fn snapshot_working_copy(
         .context("workspace should have a working-copy commit")?;
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
 
-    let mut locked_wc = workspace.working_copy().start_mutation()?;
+    let mut locked_wc = workspace.working_copy().start_mutation().await?;
     let base_ignores = load_base_ignores(workspace.workspace_root())?;
     let snapshot_options = SnapshotOptions {
         base_ignores,
@@ -864,7 +869,7 @@ async fn run_describe(
 
     let repo = if revision == "@" { snapshot_working_copy(workspace, &repo).await? } else { repo };
 
-    let commit = resolve_single_commit(&repo, workspace, revision)?;
+    let commit = resolve_single_commit(&repo, workspace, revision).await?;
     let commit_id = commit.id().hex();
     let short_id = &commit_id[..8.min(commit_id.len())];
     debug!(revision = %revision, commit_id = %short_id, "Resolved target revision");
