@@ -1,6 +1,6 @@
 # jc
 
-A [Jujutsu](https://www.jj-vcs.dev/) (`jj`) CLI tool that uses Codex to generate commit messages and bookmark names.
+A [Jujutsu](https://www.jj-vcs.dev/) (`jj`) CLI tool that uses Claude or Codex to generate commit messages and bookmark names.
 
 ## Description
 
@@ -20,9 +20,9 @@ A [Jujutsu](https://www.jj-vcs.dev/) (`jj`) CLI tool that uses Codex to generate
 
 ## Prerequisites
 
-- Rust toolchain (for building)
-- [Jujutsu (jj)](https://github.com/martinvonz/jj) - Version control system
-- [Codex CLI](https://github.com/openai/codex) - For AI generation
+- Rust toolchain for building
+- [Jujutsu (jj)](https://github.com/martinvonz/jj)
+- [Codex CLI](https://github.com/openai/codex) or [Claude Code](https://claude.com/product/claude-code) for message generation
 
 ## Installation
 
@@ -153,10 +153,6 @@ Large or noisy diffs are automatically collapsed to summary lines to keep LLM pr
 - **Size limits** — per-file limits (2048 lines / 64 KB) and total diff limits (8192 lines / 256 KB) truncate remaining large diffs
 
 Collapsed files still appear in the diff output as a one-line summary so the LLM knows the file changed.
-
-### Codex CLI
-
-Uses Codex CLI's existing configuration. Ensure it is authenticated.
 
 ## License
 
