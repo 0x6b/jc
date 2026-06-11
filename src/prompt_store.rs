@@ -21,6 +21,7 @@ use dirs::data_dir;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, from_str, to_string};
 use sha2::{Digest, Sha256};
+use textwrap::{Options, wrap};
 use tracing::{debug, warn};
 
 const DEFAULT_HEADING: &str = "AI Instructions";
@@ -298,7 +299,7 @@ pub fn select_prompts(prompts: Vec<String>, selection: Option<Vec<usize>>) -> Ve
         .collect()
 }
 
-/// Render a prompt as a Markdown quote block, one `> ` per line.
+/// Render a prompt as a Markdown quote block, one `> ` per line, wrapped at 72 columns.
 ///
 /// Trailing newlines are stripped so a prompt captured with a trailing newline (e.g. from
 /// `echo "..." | jc add`) does not produce a dangling `> ` blank line. Internal blank lines are
@@ -308,8 +309,12 @@ fn quote_prompt(prompt: &str) -> String {
     let normalized = normalized.trim_end_matches('\n');
     let mut out = String::new();
     for line in normalized.split('\n') {
-        out.push_str("> ");
-        out.push_str(line);
+        if line.trim().is_empty() {
+            out.push_str("> \n");
+            continue;
+        }
+        let opts = Options::new(72).initial_indent("> ").subsequent_indent("> ");
+        out.push_str(&wrap(line, opts).join("\n"));
         out.push('\n');
     }
     out
@@ -367,6 +372,25 @@ mod tests {
         let once = store().append_instructions("feat: x", &["a".to_string()]);
         let twice = store().append_instructions(&once, &["a".to_string()]);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn quote_prompt_wraps_long_lines_keeping_prefix() {
+        let prompt = "recent two commits add a capability to store user's prompt and add it to the commit message. while it works as advertised, i'd like move it further.";
+        let quoted = quote_prompt(prompt);
+        assert!(quoted.lines().count() > 1);
+        for line in quoted.lines() {
+            assert!(line.starts_with("> "), "missing quote prefix: {line}");
+            assert!(line.len() <= 72, "line exceeds 72 columns: {line}");
+        }
+        let rejoined =
+            quoted.lines().map(|l| &l[2..]).collect::<Vec<_>>().join(" ");
+        assert_eq!(rejoined, prompt);
+    }
+
+    #[test]
+    fn quote_prompt_keeps_short_lines_unwrapped() {
+        assert_eq!(quote_prompt("short\nlines"), "> short\n> lines\n");
     }
 
     #[test]
