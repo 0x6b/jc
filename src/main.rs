@@ -3,6 +3,7 @@ mod commit_message_generator;
 mod config;
 mod diff;
 mod llm_client;
+mod prompt_store;
 mod text_formatter;
 
 use std::{
@@ -10,6 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     env::{current_dir, var, vars},
     fmt::Write,
+    io::{Read, stdin},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -17,7 +19,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bookmark_generator::BookmarkGenerator;
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use commit_message_generator::CommitMessageGenerator;
@@ -54,6 +56,7 @@ use jj_lib::{
     working_copy::SnapshotOptions,
     workspace::{Workspace, default_working_copy_factories},
 };
+use prompt_store::PromptStore;
 use tracing::{Level, debug, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 use unicode_width::UnicodeWidthStr;
@@ -79,6 +82,9 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Record a user prompt (read from stdin) to fold into the next commit message
+    #[command(alias = "a")]
+    Add,
     /// Generate a bookmark name for commits between the current revision and a base
     #[command(alias = "b")]
     Bookmark {
@@ -112,6 +118,10 @@ enum Commands {
         /// Only print the generated message, don't commit
         #[arg(long)]
         dry_run: bool,
+
+        /// Do not append recorded user prompts as an "AI Instructions" section
+        #[arg(long)]
+        no_instructions: bool,
     },
     /// Generate and set a commit description without creating a new commit
     #[command(alias = "d")]
@@ -131,6 +141,10 @@ enum Commands {
         /// Only print the generated message, don't apply it
         #[arg(long)]
         dry_run: bool,
+
+        /// Do not append recorded user prompts as an "AI Instructions" section
+        #[arg(long)]
+        no_instructions: bool,
     },
 }
 
@@ -140,6 +154,7 @@ impl Default for Commands {
             language: "English".to_string(),
             force: false,
             dry_run: false,
+            no_instructions: false,
         }
     }
 }
@@ -381,16 +396,34 @@ async fn main() -> Result<()> {
     info!(workspace_root = ?workspace.workspace_root(), "Found workspace");
 
     match args.command.unwrap_or_default() {
+        Commands::Add => run_add(&workspace),
         Commands::Bookmark { from, to, prefix, dry_run } => {
             run_bookmark(&workspace, &model, from, &to, prefix, dry_run).await
         }
-        Commands::Commit { language, force, dry_run } => {
-            run_commit(&workspace, &language, &model, force, dry_run).await
+        Commands::Commit { language, force, dry_run, no_instructions } => {
+            run_commit(&workspace, &language, &model, force, dry_run, no_instructions).await
         }
-        Commands::Describe { revision, language, force, dry_run } => {
-            run_describe(&workspace, &language, &model, &revision, force, dry_run).await
+        Commands::Describe {
+            revision,
+            language,
+            force,
+            dry_run,
+            no_instructions,
+        } => {
+            run_describe(&workspace, &language, &model, &revision, force, dry_run, no_instructions)
+                .await
         }
     }
+}
+
+/// Record a user prompt read from stdin for the current workspace.
+fn run_add(workspace: &Workspace) -> Result<()> {
+    let mut buf = Vec::new();
+    stdin()
+        .read_to_end(&mut buf)
+        .context("Failed to read prompt from stdin")?;
+    PromptStore::new().add(workspace.workspace_root(), &buf)?;
+    Ok(())
 }
 
 async fn run_bookmark(
@@ -724,6 +757,37 @@ async fn snapshot_working_copy(
     Ok(final_repo)
 }
 
+/// Committer timestamp of a commit's first parent, used as the cutoff for which recorded prompts
+/// belong to this change. Returns `None` for root commits (no parent), meaning "include all".
+fn parent_commit_time(repo: &ReadonlyRepo, commit: &Commit) -> Option<DateTime<Utc>> {
+    let parent_id = commit.parent_ids().first()?;
+    let parent = repo.store().get_commit(parent_id).ok()?;
+    DateTime::from_timestamp_millis(parent.committer().timestamp.timestamp.0)
+}
+
+/// Append recorded user prompts to a generated message as an "AI Instructions" section.
+fn fold_in_prompts(
+    workspace: &Workspace,
+    repo: &ReadonlyRepo,
+    commit: &Commit,
+    message: String,
+    no_instructions: bool,
+) -> String {
+    if no_instructions {
+        return message;
+    }
+    let store = PromptStore::new();
+    let cutoff = parent_commit_time(repo, commit);
+    match store.prompts_since(workspace.workspace_root(), cutoff) {
+        Ok(prompts) if !prompts.is_empty() => store.append_instructions(&message, &prompts),
+        Ok(_) => message,
+        Err(e) => {
+            warn!(error = %e, "Failed to read recorded prompts; skipping AI Instructions");
+            message
+        }
+    }
+}
+
 /// Get parent tree for a commit.
 fn get_parent_tree(repo: &ReadonlyRepo, commit: &Commit) -> MergedTree {
     if let Some(parent_id) = commit.parent_ids().first()
@@ -803,6 +867,7 @@ async fn run_commit(
     model: &str,
     force: bool,
     dry_run: bool,
+    no_instructions: bool,
 ) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
@@ -838,6 +903,8 @@ async fn run_commit(
     }
 
     let commit_message = generate_message(&diff, language, model).await?;
+    let commit_message =
+        fold_in_prompts(workspace, &repo, &wc_commit, commit_message, no_instructions);
     debug!(commit_message = %commit_message, "Generated commit message");
 
     if dry_run {
@@ -863,6 +930,7 @@ async fn run_describe(
     revision: &str,
     force: bool,
     dry_run: bool,
+    no_instructions: bool,
 ) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
@@ -893,6 +961,7 @@ async fn run_describe(
     }
 
     let description = generate_message(&diff, language, model).await?;
+    let description = fold_in_prompts(workspace, &repo, &commit, description, no_instructions);
     debug!(description = %description, "Generated description");
 
     if dry_run {

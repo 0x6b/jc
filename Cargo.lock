@@ -1548,6 +1548,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "similar",
  "textwrap",
  "tokio",

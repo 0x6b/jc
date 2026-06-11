@@ -17,6 +17,7 @@ A [Jujutsu](https://www.jj-vcs.dev/) (`jj`) CLI tool that uses Claude or Codex t
 - Codex-powered commit message and bookmark name generation
 - Conventional commits format
 - Smart bookmark handling: reuses existing bookmarks in the branch, syncs to git refs
+- Records the user prompts you sent to coding agents and folds them into commit messages (inspired by [ayumi](https://github.com/stefafafan/ayumi))
 
 ## Prerequisites
 
@@ -31,6 +32,59 @@ $ cargo install --git https://github.com/0x6b/jc
 ```
 
 ## Usage
+
+### Add (record agent prompts)
+
+Record a user prompt so it can be folded into the next commit message. The prompt is read from
+standard input — either a coding-agent hook payload (JSON with a `prompt`, `user_prompt`, or
+`input` field) or plain text:
+
+```bash
+$ echo "Add JWT authentication" | jc add
+# or use the alias:
+$ echo "..." | jc a
+```
+
+Wire it into your agent's `UserPromptSubmit` hook so every instruction is captured automatically.
+For example, with Claude Code or Codex:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "jc add -p /absolute/path/to/workspace" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Recorded prompts are stored per-workspace **outside** the repository (default:
+`<platform data dir>/jc`, e.g. `~/.local/share/jc` on Linux, `~/Library/Application Support/jc` on
+macOS). Override with `JC_PROMPT_STORAGE_DIR`. Only your instructions are stored — never AI
+responses, transcripts, reasoning, or tool output.
+
+> [!WARNING]
+> `jc add` copies raw prompts into your commit messages. Do not include secrets, credentials, or
+> anything else you do not want recorded.
+
+When you later run `jc` or `jc describe`, the prompts recorded since the parent commit are appended
+to the generated message as a quoted section:
+
+```text
+feat: add JWT middleware
+
+AI Instructions:
+> Add JWT authentication
+
+> Move it into middleware
+```
+
+Customize the heading with `JC_PROMPT_HEADING` (default: `AI Instructions`), or skip the section for
+a single run with `--no-instructions`.
 
 ### Commit (default command)
 
@@ -47,6 +101,7 @@ Options:
 - `-l, --language <LANGUAGE>` - Language for commit messages [default: English]
 - `-m, --model <MODEL>` - Codex model to use [default: auto]
 - `-p, --path <PATH>` - Path to workspace [default: current directory]
+- `--no-instructions` - Don't append recorded user prompts as an "AI Instructions" section
 
 ### Describe
 
@@ -66,6 +121,7 @@ Options:
 - `-l, --language <LANGUAGE>` - Language for commit messages [default: English]
 - `-m, --model <MODEL>` - Codex model to use [default: auto]
 - `-p, --path <PATH>` - Path to workspace [default: current directory]
+- `--no-instructions` - Don't append recorded user prompts as an "AI Instructions" section
 
 Behavior:
 
@@ -117,7 +173,8 @@ $ jj git push
 2. Snapshots working copy and compares with parent tree
 3. Generates diff using jj-lib
 4. Calls Codex CLI to generate conventional commit message
-5. Creates commit with generated message
+5. Appends user prompts recorded since the parent commit as an "AI Instructions" section
+6. Creates commit with generated message
 
 ### Describe
 
@@ -125,7 +182,8 @@ $ jj git push
 2. For `@`, snapshots working copy to capture pending file changes
 3. Diffs target revision against its parent tree
 4. Calls Codex CLI to generate conventional commit message
-5. Rewrites the commit description in-place
+5. Appends user prompts recorded since the parent commit as an "AI Instructions" section
+6. Rewrites the commit description in-place
 
 ### Bookmark
 
@@ -143,6 +201,17 @@ Loads existing jj configuration from:
 
 - `~/.jjconfig.toml`
 - `~/.config/jj/config.toml`
+
+### Prompt Recording
+
+Controlled with environment variables:
+
+- `JC_PROMPT_STORAGE_DIR` - Directory for recorded prompts (default: `<platform data dir>/jc`). Must be outside the workspace.
+- `JC_PROMPT_HEADING` - Heading for the appended section (default: `AI Instructions`).
+
+Prompts are stored as JSON Lines, one file per workspace, keyed by a hash of the workspace path. At
+commit/describe time, prompts recorded after the parent commit's timestamp are included (so each
+prompt is folded into exactly one commit).
 
 ### Diff Collapsing
 
