@@ -86,6 +86,13 @@ AI Instructions:
 Customize the heading with `JC_PROMPT_HEADING` (default: `AI Instructions`), or skip the section for
 a single run with `--no-instructions`.
 
+With `--infer` (or `JC_INFER_INSTRUCTIONS=true`), the recorded prompts are also passed to the LLM as
+a numbered list. The LLM uses the prompts relevant to the diff to explain the motivation (the WHY)
+in the commit body, and only those prompts are quoted in the "AI Instructions" section — unrelated
+prompts (questions, other tasks, "continue") are dropped. The LLM reports its selection on a
+trailing `INSTRUCTIONS:` line, which jc strips; if the line is missing or unparsable, all recorded
+prompts are quoted, same as without the flag. `--no-instructions` takes precedence over `--infer`.
+
 ### Commit (default command)
 
 Generate a commit message and commit changes:
@@ -102,6 +109,7 @@ Options:
 - `-m, --model <MODEL>` - Codex model to use [default: auto]
 - `-p, --path <PATH>` - Path to workspace [default: current directory]
 - `--no-instructions` - Don't append recorded user prompts as an "AI Instructions" section
+- `--infer` - Let the LLM explain WHY from recorded prompts and quote only the relevant ones
 
 ### Describe
 
@@ -122,6 +130,7 @@ Options:
 - `-m, --model <MODEL>` - Codex model to use [default: auto]
 - `-p, --path <PATH>` - Path to workspace [default: current directory]
 - `--no-instructions` - Don't append recorded user prompts as an "AI Instructions" section
+- `--infer` - Let the LLM explain WHY from recorded prompts and quote only the relevant ones
 
 Behavior:
 
@@ -208,6 +217,7 @@ Controlled with environment variables:
 
 - `JC_PROMPT_STORAGE_DIR` - Directory for recorded prompts (default: `<platform data dir>/jc`). Must be outside the workspace.
 - `JC_PROMPT_HEADING` - Heading for the appended section (default: `AI Instructions`).
+- `JC_INFER_INSTRUCTIONS` - Enable `--infer` by default.
 
 Prompts are stored as JSON Lines, one file per workspace, keyed by a hash of the workspace path. At
 commit/describe time, prompts recorded after the parent commit's timestamp are included (so each

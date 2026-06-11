@@ -76,8 +76,24 @@ Guidelines:
     - For breaking changes, explain migration path in footer with "BREAKING CHANGE:" prefix
 
 OUTPUT ONLY THE COMMIT MESSAGE. NO EXPLANATIONS, NO COMMENTARY, NO MARKDOWN CODE BLOCKS.
-
+{instructions_section}
 Diff:
 
 {diff_content}
+"""
+
+instructions_template = """
+The following numbered instructions were given by the user to the coding agent that
+produced this diff. Use ONLY the instructions relevant to this diff as the motivation
+(the WHY) for the body. Ignore unrelated instructions: questions, other tasks, and
+conversation management such as "continue" or "yes".
+
+{numbered_prompts}
+
+EXCEPTION to the output rule: after the commit message, append one final line
+naming the relevant instruction numbers, exactly in this format:
+INSTRUCTIONS: 1,3
+If no instruction is relevant, append:
+INSTRUCTIONS: none
+This line is stripped automatically and never appears in the commit message.
 """

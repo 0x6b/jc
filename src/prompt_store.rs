@@ -227,6 +227,77 @@ fn prompt_field(value: &Value) -> Option<String> {
     }
 }
 
+/// Marker prefix the LLM uses to report which numbered instructions were relevant.
+const SELECTION_MARKER: &str = "INSTRUCTIONS:";
+
+/// Split a generated message into the message proper and the prompt selection marker.
+///
+/// The LLM is instructed to end its output with a line like `INSTRUCTIONS: 1,3` (or
+/// `INSTRUCTIONS: none`) naming the recorded prompts that are relevant to the diff. The marker
+/// line is removed from the message. Returns `None` for the selection when the marker is absent
+/// or unparsable; callers fall back to quoting all prompts.
+pub fn extract_selection(message: &str) -> (String, Option<Vec<usize>>) {
+    let trimmed = message.trim_end();
+    let Some(last_line) = trimmed.lines().last() else {
+        return (message.to_string(), None);
+    };
+    let Some(body) = last_line.trim().strip_prefix(SELECTION_MARKER) else {
+        return (message.to_string(), None);
+    };
+
+    let stripped = trimmed[..trimmed.len() - last_line.len()].trim_end().to_string();
+
+    let body = body.trim();
+    if body.eq_ignore_ascii_case("none") {
+        return (stripped, Some(Vec::new()));
+    }
+    let mut indices = Vec::new();
+    for token in body.split(',') {
+        if let Ok(n) = token.trim().parse::<usize>()
+            && !indices.contains(&n)
+        {
+            indices.push(n);
+        }
+    }
+    if indices.is_empty() {
+        warn!(marker = %last_line, "Unparsable instruction selection marker; quoting all prompts");
+        return (stripped, None);
+    }
+    (stripped, Some(indices))
+}
+
+/// Render prompts as a numbered list for the LLM, indenting continuation lines.
+pub fn render_numbered_prompts(prompts: &[String]) -> String {
+    let mut out = String::new();
+    for (i, prompt) in prompts.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        for (j, line) in prompt.trim_end().lines().enumerate() {
+            if j == 0 {
+                out.push_str(&format!("{}. {line}", i + 1));
+            } else {
+                out.push_str(&format!("\n   {line}"));
+            }
+        }
+    }
+    out
+}
+
+/// Keep only the prompts named by a 1-based selection, preserving selection order.
+///
+/// `None` means "no usable selection": all prompts are kept (the pre-existing behaviour).
+/// Out-of-range indices are ignored.
+pub fn select_prompts(prompts: Vec<String>, selection: Option<Vec<usize>>) -> Vec<String> {
+    let Some(selection) = selection else {
+        return prompts;
+    };
+    selection
+        .into_iter()
+        .filter_map(|n| n.checked_sub(1).and_then(|i| prompts.get(i)).cloned())
+        .collect()
+}
+
 /// Render a prompt as a Markdown quote block, one `> ` per line.
 ///
 /// Trailing newlines are stripped so a prompt captured with a trailing newline (e.g. from
@@ -296,5 +367,70 @@ mod tests {
         let once = store().append_instructions("feat: x", &["a".to_string()]);
         let twice = store().append_instructions(&once, &["a".to_string()]);
         assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn extract_selection_parses_indices() {
+        let (msg, sel) = extract_selection("feat: x\n\nbody\n\nINSTRUCTIONS: 1,3\n");
+        assert_eq!(msg, "feat: x\n\nbody");
+        assert_eq!(sel, Some(vec![1, 3]));
+    }
+
+    #[test]
+    fn extract_selection_parses_none() {
+        let (msg, sel) = extract_selection("feat: x\n\nINSTRUCTIONS: none");
+        assert_eq!(msg, "feat: x");
+        assert_eq!(sel, Some(vec![]));
+    }
+
+    #[test]
+    fn extract_selection_tolerates_spaces_and_duplicates() {
+        let (_, sel) = extract_selection("feat: x\n\nINSTRUCTIONS: 2, 1, 2");
+        assert_eq!(sel, Some(vec![2, 1]));
+    }
+
+    #[test]
+    fn extract_selection_missing_marker_returns_message_unchanged() {
+        let original = "feat: x\n\nbody";
+        let (msg, sel) = extract_selection(original);
+        assert_eq!(msg, original);
+        assert_eq!(sel, None);
+    }
+
+    #[test]
+    fn extract_selection_strips_malformed_marker_without_selection() {
+        let (msg, sel) = extract_selection("feat: x\n\nINSTRUCTIONS: a,b");
+        assert_eq!(msg, "feat: x");
+        assert_eq!(sel, None);
+    }
+
+    #[test]
+    fn render_numbered_prompts_numbers_and_indents() {
+        let prompts = ["first".to_string(), "second\nline two".to_string()];
+        assert_eq!(render_numbered_prompts(&prompts), "1. first\n2. second\n   line two");
+    }
+
+    #[test]
+    fn select_prompts_none_returns_all() {
+        let prompts = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(select_prompts(prompts.clone(), None), prompts);
+    }
+
+    #[test]
+    fn select_prompts_filters_by_one_based_index() {
+        let prompts = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(select_prompts(prompts, Some(vec![3, 1])), vec!["c", "a"]);
+    }
+
+    #[test]
+    fn select_prompts_ignores_out_of_range() {
+        let prompts = vec!["a".to_string()];
+        assert_eq!(select_prompts(prompts, Some(vec![0, 1, 2])), vec!["a"]);
+    }
+
+    #[test]
+    fn select_prompts_empty_selection_returns_nothing() {
+        let prompts = vec!["a".to_string()];
+        assert!(select_prompts(prompts, Some(vec![])).is_empty());
     }
 }

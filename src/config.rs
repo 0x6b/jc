@@ -43,6 +43,7 @@ pub struct Config {
 #[derive(Deserialize)]
 pub struct PromptConfig {
     pub template: String,
+    pub instructions_template: String,
 }
 
 #[derive(Deserialize)]
@@ -74,3 +75,21 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     };
     from_str(toml_str).expect("Failed to parse embedded config")
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_configs_have_prompt_placeholders() {
+        for toml_str in [
+            include_str!("../assets/claude-config.toml"),
+            include_str!("../assets/codex-config.toml"),
+        ] {
+            let config: Config = from_str(toml_str).expect("embedded config should parse");
+            assert!(config.prompt.template.contains("{diff_content}"));
+            assert!(config.prompt.template.contains("{instructions_section}"));
+            assert!(config.prompt.instructions_template.contains("{numbered_prompts}"));
+        }
+    }
+}
