@@ -228,8 +228,13 @@ fn prompt_field(value: &Value) -> Option<String> {
 }
 
 /// Render a prompt as a Markdown quote block, one `> ` per line.
+///
+/// Trailing newlines are stripped so a prompt captured with a trailing newline (e.g. from
+/// `echo "..." | jc add`) does not produce a dangling `> ` blank line. Internal blank lines are
+/// preserved so multi-paragraph prompts keep their structure.
 fn quote_prompt(prompt: &str) -> String {
     let normalized = prompt.replace("\r\n", "\n").replace('\r', "\n");
+    let normalized = normalized.trim_end_matches('\n');
     let mut out = String::new();
     for line in normalized.split('\n') {
         out.push_str("> ");
