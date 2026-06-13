@@ -2,19 +2,9 @@
 
 A [Jujutsu](https://www.jj-vcs.dev/) (`jj`) CLI tool that uses Claude or Codex to generate commit messages and bookmark names.
 
-## Description
-
-`jc` is a standalone command-line tool for Jujutsu workspaces that:
-
-- Automatically generates commit messages from diffs using Codex
-- Generates and sets commit descriptions on any revision using AI
-- Generates meaningful bookmark (branch) names from commit summaries
-
-## Features
-
 - Automatic jj workspace discovery
 - Diff extraction using jj-lib (in-process, no shell-out)
-- Codex-powered commit message and bookmark name generation
+- Codex- or Claude-powered commit message and bookmark name generation
 - Conventional commits format
 - Smart bookmark handling: reuses existing bookmarks in the branch, syncs to git refs
 - Records the user prompts you sent to coding agents and folds them into commit messages (inspired by [ayumi](https://github.com/stefafafan/ayumi))
@@ -33,20 +23,15 @@ $ cargo install --git https://github.com/0x6b/jc
 
 ## Usage
 
-### Add (record agent prompts)
+### Add
 
-Record a user prompt so it can be folded into the next commit message. The prompt is read from
-standard input — either a coding-agent hook payload (JSON with a `prompt`, `user_prompt`, or
-`input` field) or plain text:
+Record a user prompt so it can be folded into the next commit message. The prompt is read from standard input; either a coding-agent hook payload (JSON with a `prompt`, `user_prompt`, or `input` field) or plain text:
 
-```bash
+```console
 $ echo "Add JWT authentication" | jc add
-# or use the alias:
-$ echo "..." | jc a
 ```
 
-Wire it into your agent's `UserPromptSubmit` hook so every instruction is captured automatically.
-For example, with Claude Code or Codex:
+Configure it into your agent's `UserPromptSubmit` hook so every instruction is captured. For example, with Claude Code or Codex:
 
 ```json
 {
@@ -54,7 +39,10 @@ For example, with Claude Code or Codex:
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "jc add -p /absolute/path/to/workspace" }
+          {
+            "type": "command",
+            "command": "jc add -p /absolute/path/to/workspace"
+          }
         ]
       }
     ]
@@ -62,17 +50,12 @@ For example, with Claude Code or Codex:
 }
 ```
 
-Recorded prompts are stored per-workspace **outside** the repository (default:
-`<platform data dir>/jc`, e.g. `~/.local/share/jc` on Linux, `~/Library/Application Support/jc` on
-macOS). Override with `JC_PROMPT_STORAGE_DIR`. Only your instructions are stored — never AI
-responses, transcripts, reasoning, or tool output.
+Recorded prompts are stored per-workspace outside the repository (default: `<platform data dir>/jc`, e.g. `~/.local/share/jc` on Linux, `~/Library/Application Support/jc` on macOS). Override with `JC_PROMPT_STORAGE_DIR`. AI responses, transcripts, reasoning, or tool output won't be saved.
 
 > [!WARNING]
-> `jc add` copies raw prompts into your commit messages. Do not include secrets, credentials, or
-> anything else you do not want recorded.
+> `jc add` copies raw prompts into your commit messages. Do not include secrets, credentials, or anything else you do not want recorded.
 
-When you later run `jc` or `jc describe`, the prompts recorded since the parent commit are appended
-to the generated message as a quoted section:
+When you later run `jc` or `jc describe`, the prompts recorded since the parent commit are appended to the generated message as a quoted section:
 
 ```text
 feat: add JWT middleware
@@ -83,17 +66,11 @@ AI Instructions:
 > Move it into middleware
 ```
 
-Customize the heading with `JC_PROMPT_HEADING` (default: `AI Instructions`), or skip the section for
-a single run with `--no-instructions`.
+Customize the heading with `JC_PROMPT_HEADING` (default: `AI Instructions`), or skip the section for a single run with `--no-instructions`.
 
-With `--infer` (or `JC_INFER_INSTRUCTIONS=true`), the recorded prompts are also passed to the LLM as
-a numbered list. The LLM uses the prompts relevant to the diff to explain the motivation (the WHY)
-in the commit body, and only those prompts are quoted in the "AI Instructions" section — unrelated
-prompts (questions, other tasks, "continue") are dropped. The LLM reports its selection on a
-trailing `INSTRUCTIONS:` line, which jc strips; if the line is missing or unparsable, all recorded
-prompts are quoted, same as without the flag. `--no-instructions` takes precedence over `--infer`.
+With `--infer` (or `JC_INFER_INSTRUCTIONS=true`), the recorded prompts are also passed to the LLM as a numbered list. The LLM uses the prompts relevant to the diff to explain the motivation (the WHY) in the commit body, and only those prompts are quoted in the "AI Instructions" section. Unrelated prompts (questions, other tasks, "continue") will be dropped. The LLM reports its selection on a trailing `INSTRUCTIONS:` line, which jc also strips; if the line is missing or unparsable, all recorded prompts are quoted, same as without the flag. `--no-instructions` takes precedence over `--infer`.
 
-### Commit (default command)
+### Commit
 
 Generate a commit message and commit changes:
 
@@ -174,34 +151,6 @@ $ jc b
 $ jj git push
 ```
 
-## How It Works
-
-### Commit
-
-1. Discovers jj workspace from current directory
-2. Snapshots working copy and compares with parent tree
-3. Generates diff using jj-lib
-4. Calls Codex CLI to generate conventional commit message
-5. Appends user prompts recorded since the parent commit as an "AI Instructions" section
-6. Creates commit with generated message
-
-### Describe
-
-1. Resolves target revision (default: `@`)
-2. For `@`, snapshots working copy to capture pending file changes
-3. Diffs target revision against its parent tree
-4. Calls Codex CLI to generate conventional commit message
-5. Appends user prompts recorded since the parent commit as an "AI Instructions" section
-6. Rewrites the commit description in-place
-
-### Bookmark
-
-1. Resolves target revision (uses `@-` if `@` is empty)
-2. Checks for existing bookmark in the branch range (`from..to`)
-3. If found, moves existing bookmark to target
-4. If not, generates name from commit summaries via Codex
-5. Exports bookmark to git refs
-
 ## Configuration
 
 ### User Configuration
@@ -232,6 +181,40 @@ Large or noisy diffs are automatically collapsed to summary lines to keep LLM pr
 - **Size limits** — per-file limits (2048 lines / 64 KB) and total diff limits (8192 lines / 256 KB) truncate remaining large diffs
 
 Collapsed files still appear in the diff output as a one-line summary so the LLM knows the file changed.
+
+## How It Works
+
+### Add
+
+1. Reads a prompt from standard input (a coding-agent hook payload or plain text)
+2. Extracts the prompt text from the `prompt`, `user_prompt`, or `input` field, falling back to the raw input
+3. Stores it as a JSON Lines record in the per-workspace prompt file, outside the repository
+
+### Commit
+
+1. Discovers jj workspace from current directory
+2. Snapshots working copy and compares with parent tree
+3. Generates diff using jj-lib
+4. Calls Codex CLI to generate conventional commit message
+5. Appends user prompts recorded since the parent commit as an "AI Instructions" section
+6. Creates commit with generated message
+
+### Describe
+
+1. Resolves target revision (default: `@`)
+2. For `@`, snapshots working copy to capture pending file changes
+3. Diffs target revision against its parent tree
+4. Calls Codex CLI to generate conventional commit message
+5. Appends user prompts recorded since the parent commit as an "AI Instructions" section
+6. Rewrites the commit description in-place
+
+### Bookmark
+
+1. Resolves target revision (uses `@-` if `@` is empty)
+2. Checks for existing bookmark in the branch range (`from..to`)
+3. If found, moves existing bookmark to target
+4. If not, generates name from commit summaries via Codex
+5. Exports bookmark to git refs
 
 ## License
 
