@@ -9,8 +9,9 @@ mod text_formatter;
 use std::{
     borrow::ToOwned,
     collections::{HashMap, HashSet},
-    env::{current_dir, var, vars},
+    env::{current_dir, current_exe, var, vars},
     fmt::Write,
+    fs::{create_dir_all, read_to_string, write},
     io::{Read, stdin},
     path::{Path, PathBuf},
     process::Command,
@@ -57,6 +58,7 @@ use jj_lib::{
     workspace::{Workspace, default_working_copy_factories},
 };
 use prompt_store::{PromptStore, select_prompts};
+use serde_json::{Value, from_str, json, to_string_pretty};
 use tracing::{Level, debug, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 use unicode_width::UnicodeWidthStr;
@@ -85,6 +87,8 @@ enum Commands {
     /// Record a user prompt (read from stdin) to fold into the next commit message
     #[command(alias = "a")]
     Add,
+    /// Install the `UserPromptSubmit` hook for this workspace into .claude/settings.local.json
+    Install,
     /// Generate a bookmark name for commits between the current revision and a base
     #[command(alias = "b")]
     Bookmark {
@@ -408,6 +412,7 @@ async fn main() -> Result<()> {
 
     match args.command.unwrap_or_default() {
         Commands::Add => run_add(&workspace),
+        Commands::Install => run_install(&workspace),
         Commands::Bookmark { from, to, prefix, dry_run } => {
             run_bookmark(&workspace, &model, from, &to, prefix, dry_run).await
         }
@@ -445,6 +450,103 @@ fn run_add(workspace: &Workspace) -> Result<()> {
         .context("Failed to read prompt from stdin")?;
     PromptStore::new().add(workspace.workspace_root(), &buf)?;
     Ok(())
+}
+
+/// Result of merging the hook into an existing settings file.
+enum InstallOutcome {
+    Installed,
+    Updated,
+    AlreadyExists,
+}
+
+/// Install a `UserPromptSubmit` hook that runs `jc add` for this workspace into
+/// `<workspace>/.claude/settings.local.json`, so every prompt is recorded automatically.
+fn run_install(workspace: &Workspace) -> Result<()> {
+    let root = workspace.workspace_root();
+    let binary = current_exe()
+        .context("Failed to resolve the jc binary path")?
+        .display()
+        .to_string();
+    let command = format!("{binary} add -p {}", root.display());
+
+    let claude_dir = root.join(".claude");
+    create_dir_all(&claude_dir).context("Failed to create .claude directory")?;
+    let settings_path = claude_dir.join("settings.local.json");
+
+    let settings = if settings_path.exists() {
+        let content = read_to_string(&settings_path)
+            .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        from_str::<Value>(&content)
+            .with_context(|| format!("{} is not valid JSON", settings_path.display()))?
+    } else {
+        json!({})
+    };
+
+    let (settings, outcome) = upsert_user_prompt_hook(settings, &binary, &command);
+
+    write(&settings_path, to_string_pretty(&settings)?)
+        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+
+    let path = settings_path.display();
+    match outcome {
+        InstallOutcome::Installed => println!("Hook installed to {path}"),
+        InstallOutcome::Updated => println!("Hook updated in {path}"),
+        InstallOutcome::AlreadyExists => println!("Hook already present in {path}"),
+    }
+    Ok(())
+}
+
+/// Insert or update the `UserPromptSubmit` hook for `command` in the settings JSON.
+///
+/// An existing hook whose command starts with `binary_path` is updated in place (so re-running
+/// install for a moved workspace refreshes the `-p` path instead of adding a duplicate). Malformed
+/// `hooks`/`UserPromptSubmit` values are replaced with the correct shape.
+fn upsert_user_prompt_hook(
+    mut settings: Value,
+    binary_path: &str,
+    command: &str,
+) -> (Value, InstallOutcome) {
+    if !settings.is_object() {
+        settings = json!({});
+    }
+    let root = settings.as_object_mut().unwrap();
+
+    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
+    if !hooks.is_object() {
+        *hooks = json!({});
+    }
+    let events = hooks.as_object_mut().unwrap();
+
+    let ups = events.entry("UserPromptSubmit").or_insert_with(|| json!([]));
+    if !ups.is_array() {
+        *ups = json!([]);
+    }
+    let ups = ups.as_array_mut().unwrap();
+
+    let existing = ups.iter().position(|entry| {
+        entry
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .and_then(|inner| inner.first())
+            .and_then(|h| h.get("command"))
+            .and_then(|c| c.as_str())
+            .is_some_and(|c| c.starts_with(binary_path))
+    });
+
+    let outcome = if let Some(i) = existing {
+        let current = ups[i]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();
+        if current == command {
+            InstallOutcome::AlreadyExists
+        } else {
+            ups[i]["hooks"][0]["command"] = json!(command);
+            InstallOutcome::Updated
+        }
+    } else {
+        ups.push(json!({ "hooks": [ { "type": "command", "command": command } ] }));
+        InstallOutcome::Installed
+    };
+
+    (settings, outcome)
 }
 
 async fn run_bookmark(
@@ -1147,6 +1249,56 @@ mod tests {
         let first_line = result.lines().next().unwrap_or("");
         assert!(strip_ansi_codes(first_line).contains("╭─Title"));
         assert!(strip_ansi_codes(&result).contains("╰"));
+    }
+
+    #[test]
+    fn test_install_into_empty_settings() {
+        let (settings, outcome) =
+            upsert_user_prompt_hook(json!({}), "/bin/jc", "/bin/jc add -p /repo");
+        assert!(matches!(outcome, InstallOutcome::Installed));
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            json!("/bin/jc add -p /repo")
+        );
+        assert_eq!(settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["type"], json!("command"));
+    }
+
+    #[test]
+    fn test_install_is_idempotent() {
+        let (settings, _) = upsert_user_prompt_hook(json!({}), "/bin/jc", "/bin/jc add -p /repo");
+        let (settings, outcome) =
+            upsert_user_prompt_hook(settings, "/bin/jc", "/bin/jc add -p /repo");
+        assert!(matches!(outcome, InstallOutcome::AlreadyExists));
+        assert_eq!(settings["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_install_updates_changed_path() {
+        let (settings, _) = upsert_user_prompt_hook(json!({}), "/bin/jc", "/bin/jc add -p /old");
+        let (settings, outcome) =
+            upsert_user_prompt_hook(settings, "/bin/jc", "/bin/jc add -p /new");
+        assert!(matches!(outcome, InstallOutcome::Updated));
+        let ups = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 1);
+        assert_eq!(ups[0]["hooks"][0]["command"], json!("/bin/jc add -p /new"));
+    }
+
+    #[test]
+    fn test_install_preserves_other_hooks() {
+        let existing = json!({
+            "hooks": {
+                "UserPromptSubmit": [
+                    { "hooks": [ { "type": "command", "command": "/other/tool" } ] }
+                ]
+            },
+            "model": "opus"
+        });
+        let (settings, outcome) =
+            upsert_user_prompt_hook(existing, "/bin/jc", "/bin/jc add -p /repo");
+        assert!(matches!(outcome, InstallOutcome::Installed));
+        let ups = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
+        assert_eq!(ups.len(), 2);
+        assert_eq!(settings["model"], json!("opus"));
     }
 
     #[test]
