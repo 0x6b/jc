@@ -234,10 +234,10 @@ fn format_collapsed_summary(
     )
 }
 
-/// Result of [`get_tree_diff`]: the diff string and how many files were collapsed.
+/// Result of [`get_tree_diff`]: the diff string and the paths that were collapsed.
 pub struct TreeDiffResult {
     pub diff: String,
-    pub collapsed_count: usize,
+    pub collapsed_paths: Vec<String>,
 }
 
 /// Buffer a diff stream so we can detect exact renames.
@@ -325,7 +325,7 @@ pub async fn get_tree_diff(
 
     let mut output = String::new();
     let mut file_count = 0;
-    let mut collapsed_count = 0;
+    let mut collapsed_paths = Vec::new();
 
     // Emit renames first
     for (i, kind) in classified.iter().enumerate() {
@@ -382,7 +382,7 @@ pub async fn get_tree_diff(
                             line_count > max_diff_lines || byte_size > max_diff_bytes;
                         trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = line_count, bytes = byte_size, "Processing added file");
                         if should_collapse || should_collapse_size {
-                            collapsed_count += 1;
+                            collapsed_paths.push(path_str.to_string());
                             let reason = collapse_reason(
                                 gitattr_reason,
                                 should_collapse,
@@ -411,7 +411,7 @@ pub async fn get_tree_diff(
                             line_count > max_diff_lines || byte_size > max_diff_bytes;
                         trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = line_count, bytes = byte_size, "Processing deleted file");
                         if should_collapse || should_collapse_size {
-                            collapsed_count += 1;
+                            collapsed_paths.push(path_str.to_string());
                             let reason = collapse_reason(
                                 gitattr_reason,
                                 should_collapse,
@@ -459,7 +459,7 @@ pub async fn get_tree_diff(
                                 added + removed > max_diff_lines || byte_size > max_diff_bytes;
                             trace!(path = %path_str, collapsed = should_collapse, collapsed_size = should_collapse_size, lines = added + removed, bytes = byte_size, "Processing modified file");
                             if should_collapse || should_collapse_size {
-                                collapsed_count += 1;
+                                collapsed_paths.push(path_str.to_string());
                                 let reason = collapse_reason(
                                     gitattr_reason,
                                     should_collapse,
@@ -500,8 +500,8 @@ pub async fn get_tree_diff(
         }
     }
 
-    debug!(file_count, collapsed_count, output_len = output.len(), "Tree diff complete");
-    Ok(TreeDiffResult { diff: output, collapsed_count })
+    debug!(file_count, collapsed_count = collapsed_paths.len(), output_len = output.len(), "Tree diff complete");
+    Ok(TreeDiffResult { diff: output, collapsed_paths })
 }
 
 /// Get summary of file changes between two trees
