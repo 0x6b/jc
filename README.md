@@ -50,6 +50,8 @@ Configure it into your agent's `UserPromptSubmit` hook so every instruction is c
 }
 ```
 
+Or run `jc install` from the workspace to write this hook automatically (see [Install](#install)).
+
 Recorded prompts are stored per-workspace outside the repository (default: `<platform data dir>/jc`, e.g. `~/.local/share/jc` on Linux, `~/Library/Application Support/jc` on macOS). Override with `JC_PROMPT_STORAGE_DIR`. AI responses, transcripts, reasoning, or tool output won't be saved.
 
 > [!WARNING]
@@ -69,6 +71,23 @@ AI Instructions:
 Customize the heading with `JC_PROMPT_HEADING` (default: `AI Instructions`), or skip the section for a single run with `--no-instructions`.
 
 With `--infer` (or `JC_INFER_INSTRUCTIONS=true`), the recorded prompts are also passed to the LLM as a numbered list. The LLM uses the prompts relevant to the diff to explain the motivation (the WHY) in the commit body, and only those prompts are quoted in the "AI Instructions" section. Unrelated prompts (questions, other tasks, "continue") will be dropped. The LLM reports its selection on a trailing `INSTRUCTIONS:` line, which jc also strips; if the line is missing or unparsable, all recorded prompts are quoted, same as without the flag. `--no-instructions` takes precedence over `--infer`.
+
+### Install
+
+Write the `UserPromptSubmit` hook for the current workspace into `.claude/settings.local.json` so prompts are recorded automatically, without editing JSON by hand:
+
+```console
+$ jc install
+Hook installed to /path/to/workspace/.claude/settings.local.json
+```
+
+The hook command is `<path to jc> add -p <workspace root>`, both resolved to absolute paths.
+
+Behavior:
+
+- Discovers the jj workspace from the current directory (or `-p <path>`)
+- Creates `.claude/` and `settings.local.json` if they don't exist; otherwise merges into the existing file, preserving other hooks, permissions, and settings
+- Idempotent: re-running reports `Hook already present`. If the workspace path changed, it updates the existing `jc` hook in place (`Hook updated`) instead of adding a duplicate
 
 ### Commit
 
