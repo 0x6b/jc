@@ -10,6 +10,7 @@
 
 use std::{
     env::{var, var_os},
+    fmt::Write as _,
     fs::{OpenOptions, canonicalize, create_dir_all, read_to_string},
     io::{ErrorKind, Write},
     path::{Path, PathBuf},
@@ -45,9 +46,8 @@ impl PromptStore {
     /// - `JC_PROMPT_STORAGE_DIR` overrides the storage directory (default: `<data dir>/jc`).
     /// - `JC_PROMPT_HEADING` overrides the section heading (default: `AI Instructions`).
     pub fn new() -> Self {
-        let storage_dir = var_os("JC_PROMPT_STORAGE_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(default_storage_dir);
+        let storage_dir =
+            var_os("JC_PROMPT_STORAGE_DIR").map_or_else(default_storage_dir, PathBuf::from);
         let heading = var("JC_PROMPT_HEADING")
             .ok()
             .filter(|s| !s.trim().is_empty())
@@ -123,8 +123,7 @@ impl PromptStore {
             let include = match cutoff {
                 None => true,
                 Some(cutoff) => DateTime::parse_from_rfc3339(&entry.timestamp)
-                    .map(|t| t.with_timezone(&Utc) > cutoff)
-                    .unwrap_or(true),
+                    .map_or(true, |t| t.with_timezone(&Utc) > cutoff),
             };
             if include {
                 prompts.push(entry.prompt);
@@ -178,9 +177,7 @@ impl PromptStore {
 
 /// Default storage directory: `<platform data dir>/jc`, falling back to `./.jc-prompts`.
 fn default_storage_dir() -> PathBuf {
-    data_dir()
-        .map(|d| d.join("jc"))
-        .unwrap_or_else(|| PathBuf::from(".jc-prompts"))
+    data_dir().map_or_else(|| PathBuf::from(".jc-prompts"), |d| d.join("jc"))
 }
 
 /// Stable hex identifier for a workspace, derived from its canonical path.
@@ -276,9 +273,9 @@ pub fn render_numbered_prompts(prompts: &[String]) -> String {
         }
         for (j, line) in prompt.trim_end().lines().enumerate() {
             if j == 0 {
-                out.push_str(&format!("{}. {line}", i + 1));
+                let _ = write!(out, "{}. {line}", i + 1);
             } else {
-                out.push_str(&format!("\n   {line}"));
+                let _ = write!(out, "\n   {line}");
             }
         }
     }
@@ -383,8 +380,7 @@ mod tests {
             assert!(line.starts_with("> "), "missing quote prefix: {line}");
             assert!(line.len() <= 72, "line exceeds 72 columns: {line}");
         }
-        let rejoined =
-            quoted.lines().map(|l| &l[2..]).collect::<Vec<_>>().join(" ");
+        let rejoined = quoted.lines().map(|l| &l[2..]).collect::<Vec<_>>().join(" ");
         assert_eq!(rejoined, prompt);
     }
 

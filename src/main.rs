@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     env::{current_dir, current_exe, var, vars},
     fmt::Write,
-    fs::{create_dir_all, read_to_string},
+    fs::{create_dir_all, read_to_string, write},
     io::{Read, stdin},
     path::{Path, PathBuf},
     process::Command,
@@ -484,7 +484,7 @@ fn run_install(workspace: &Workspace) -> Result<()> {
 
     let (settings, outcome) = upsert_user_prompt_hook(settings, &binary, &command);
 
-    std::fs::write(&settings_path, to_string_pretty(&settings)?)
+    write(&settings_path, to_string_pretty(&settings)?)
         .with_context(|| format!("Failed to write {}", settings_path.display()))?;
 
     let path = settings_path.display();
@@ -533,20 +533,17 @@ fn upsert_user_prompt_hook(
             .is_some_and(|c| c.starts_with(binary_path))
     });
 
-    let outcome = match existing {
-        Some(i) => {
-            let current = ups[i]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();
-            if current == command {
-                InstallOutcome::AlreadyExists
-            } else {
-                ups[i]["hooks"][0]["command"] = json!(command);
-                InstallOutcome::Updated
-            }
+    let outcome = if let Some(i) = existing {
+        let current = ups[i]["hooks"][0]["command"].as_str().unwrap_or_default().to_string();
+        if current == command {
+            InstallOutcome::AlreadyExists
+        } else {
+            ups[i]["hooks"][0]["command"] = json!(command);
+            InstallOutcome::Updated
         }
-        None => {
-            ups.push(json!({ "hooks": [ { "type": "command", "command": command } ] }));
-            InstallOutcome::Installed
-        }
+    } else {
+        ups.push(json!({ "hooks": [ { "type": "command", "command": command } ] }));
+        InstallOutcome::Installed
     };
 
     (settings, outcome)
@@ -1256,16 +1253,14 @@ mod tests {
 
     #[test]
     fn test_install_into_empty_settings() {
-        let (settings, outcome) = upsert_user_prompt_hook(json!({}), "/bin/jc", "/bin/jc add -p /repo");
+        let (settings, outcome) =
+            upsert_user_prompt_hook(json!({}), "/bin/jc", "/bin/jc add -p /repo");
         assert!(matches!(outcome, InstallOutcome::Installed));
         assert_eq!(
             settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
             json!("/bin/jc add -p /repo")
         );
-        assert_eq!(
-            settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["type"],
-            json!("command")
-        );
+        assert_eq!(settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["type"], json!("command"));
     }
 
     #[test]
