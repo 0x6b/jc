@@ -3,6 +3,7 @@ mod commit_message_generator;
 mod config;
 mod diff;
 mod llm_client;
+mod prompt_store;
 mod text_formatter;
 
 use std::{
@@ -10,6 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
     env::{current_dir, var, vars},
     fmt::Write,
+    io::{Read, stdin},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -17,7 +19,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use bookmark_generator::BookmarkGenerator;
-use chrono::Local;
+use chrono::{DateTime, Local, Utc};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use commit_message_generator::CommitMessageGenerator;
@@ -54,6 +56,7 @@ use jj_lib::{
     working_copy::SnapshotOptions,
     workspace::{Workspace, default_working_copy_factories},
 };
+use prompt_store::{PromptStore, select_prompts};
 use tracing::{Level, debug, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 use unicode_width::UnicodeWidthStr;
@@ -79,6 +82,9 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Record a user prompt (read from stdin) to fold into the next commit message
+    #[command(alias = "a")]
+    Add,
     /// Generate a bookmark name for commits between the current revision and a base
     #[command(alias = "b")]
     Bookmark {
@@ -112,6 +118,15 @@ enum Commands {
         /// Only print the generated message, don't commit
         #[arg(long)]
         dry_run: bool,
+
+        /// Do not append recorded user prompts as an "AI Instructions" section
+        #[arg(long)]
+        no_instructions: bool,
+
+        /// Let the LLM use recorded prompts to explain WHY in the body, and quote only the
+        /// prompts it judged relevant (ignored with --no-instructions)
+        #[arg(long, env = "JC_INFER_INSTRUCTIONS")]
+        infer: bool,
     },
     /// Generate and set a commit description without creating a new commit
     #[command(alias = "d")]
@@ -131,6 +146,15 @@ enum Commands {
         /// Only print the generated message, don't apply it
         #[arg(long)]
         dry_run: bool,
+
+        /// Do not append recorded user prompts as an "AI Instructions" section
+        #[arg(long)]
+        no_instructions: bool,
+
+        /// Let the LLM use recorded prompts to explain WHY in the body, and quote only the
+        /// prompts it judged relevant (ignored with --no-instructions)
+        #[arg(long, env = "JC_INFER_INSTRUCTIONS")]
+        infer: bool,
     },
 }
 
@@ -140,6 +164,8 @@ impl Default for Commands {
             language: "English".to_string(),
             force: false,
             dry_run: false,
+            no_instructions: false,
+            infer: false,
         }
     }
 }
@@ -381,16 +407,44 @@ async fn main() -> Result<()> {
     info!(workspace_root = ?workspace.workspace_root(), "Found workspace");
 
     match args.command.unwrap_or_default() {
+        Commands::Add => run_add(&workspace),
         Commands::Bookmark { from, to, prefix, dry_run } => {
             run_bookmark(&workspace, &model, from, &to, prefix, dry_run).await
         }
-        Commands::Commit { language, force, dry_run } => {
-            run_commit(&workspace, &language, &model, force, dry_run).await
+        Commands::Commit { language, force, dry_run, no_instructions, infer } => {
+            run_commit(&workspace, &language, &model, force, dry_run, no_instructions, infer).await
         }
-        Commands::Describe { revision, language, force, dry_run } => {
-            run_describe(&workspace, &language, &model, &revision, force, dry_run).await
+        Commands::Describe {
+            revision,
+            language,
+            force,
+            dry_run,
+            no_instructions,
+            infer,
+        } => {
+            run_describe(
+                &workspace,
+                &language,
+                &model,
+                &revision,
+                force,
+                dry_run,
+                no_instructions,
+                infer,
+            )
+            .await
         }
     }
+}
+
+/// Record a user prompt read from stdin for the current workspace.
+fn run_add(workspace: &Workspace) -> Result<()> {
+    let mut buf = Vec::new();
+    stdin()
+        .read_to_end(&mut buf)
+        .context("Failed to read prompt from stdin")?;
+    PromptStore::new().add(workspace.workspace_root(), &buf)?;
+    Ok(())
 }
 
 async fn run_bookmark(
@@ -724,6 +778,35 @@ async fn snapshot_working_copy(
     Ok(final_repo)
 }
 
+/// Committer timestamp of a commit's first parent, used as the cutoff for which recorded prompts
+/// belong to this change. Returns `None` for root commits (no parent), meaning "include all".
+fn parent_commit_time(repo: &ReadonlyRepo, commit: &Commit) -> Option<DateTime<Utc>> {
+    let parent_id = commit.parent_ids().first()?;
+    let parent = repo.store().get_commit(parent_id).ok()?;
+    DateTime::from_timestamp_millis(parent.committer().timestamp.timestamp.0)
+}
+
+/// Load recorded user prompts that belong to this change, or an empty list when disabled or
+/// unavailable.
+fn load_prompts(
+    workspace: &Workspace,
+    repo: &ReadonlyRepo,
+    commit: &Commit,
+    no_instructions: bool,
+) -> Vec<String> {
+    if no_instructions {
+        return Vec::new();
+    }
+    let cutoff = parent_commit_time(repo, commit);
+    match PromptStore::new().prompts_since(workspace.workspace_root(), cutoff) {
+        Ok(prompts) => prompts,
+        Err(e) => {
+            warn!(error = %e, "Failed to read recorded prompts; skipping AI Instructions");
+            Vec::new()
+        }
+    }
+}
+
 /// Get parent tree for a commit.
 fn get_parent_tree(repo: &ReadonlyRepo, commit: &Commit) -> MergedTree {
     if let Some(parent_id) = commit.parent_ids().first()
@@ -788,21 +871,29 @@ async fn generate_diff(
 }
 
 /// Generate a commit message from a diff using the configured LLM backend.
-async fn generate_message(diff: &str, language: &str, model: &str) -> Result<String> {
+async fn generate_message(
+    diff: &str,
+    language: &str,
+    model: &str,
+    instruction_prompts: &[String],
+) -> Result<(String, Option<Vec<usize>>)> {
     info!(language = %language, model = %model, backend = %config::backend(), "Generating commit message");
     let generator = CommitMessageGenerator::new(language, model);
-    match generator.generate(diff).await {
-        Some(msg) => Ok(msg),
+    match generator.generate(diff, instruction_prompts).await {
+        Some(result) => Ok(result),
         None => bail!("Failed to generate commit message"),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_commit(
     workspace: &Workspace,
     language: &str,
     model: &str,
     force: bool,
     dry_run: bool,
+    no_instructions: bool,
+    infer: bool,
 ) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
@@ -837,7 +928,12 @@ async fn run_commit(
         eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
     }
 
-    let commit_message = generate_message(&diff, language, model).await?;
+    let prompts = load_prompts(workspace, &repo, &wc_commit, no_instructions);
+    let instruction_prompts: &[String] = if infer { &prompts } else { &[] };
+    let (commit_message, selection) =
+        generate_message(&diff, language, model, instruction_prompts).await?;
+    let quoted = select_prompts(prompts, selection);
+    let commit_message = PromptStore::new().append_instructions(&commit_message, &quoted);
     debug!(commit_message = %commit_message, "Generated commit message");
 
     if dry_run {
@@ -856,6 +952,7 @@ async fn run_commit(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_describe(
     workspace: &Workspace,
     language: &str,
@@ -863,6 +960,8 @@ async fn run_describe(
     revision: &str,
     force: bool,
     dry_run: bool,
+    no_instructions: bool,
+    infer: bool,
 ) -> Result<()> {
     let repo = workspace.repo_loader().load_at_head().await?;
     debug!("Loaded repository at head");
@@ -892,7 +991,12 @@ async fn run_describe(
         eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
     }
 
-    let description = generate_message(&diff, language, model).await?;
+    let prompts = load_prompts(workspace, &repo, &commit, no_instructions);
+    let instruction_prompts: &[String] = if infer { &prompts } else { &[] };
+    let (description, selection) =
+        generate_message(&diff, language, model, instruction_prompts).await?;
+    let quoted = select_prompts(prompts, selection);
+    let description = PromptStore::new().append_instructions(&description, &quoted);
     debug!(description = %description, "Generated description");
 
     if dry_run {
