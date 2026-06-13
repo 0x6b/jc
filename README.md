@@ -216,6 +216,10 @@ Collapsed files still appear in the diff output as a one-line summary so the LLM
 4. If not, generates name from commit summaries via Codex
 5. Exports bookmark to git refs
 
+## Acknowledgement
+
+The `add` subcommand, which records user prompts from standard input, is inspired by [ayumi](https://github.com/stefafafan/ayumi), by my colleague [@stefafafan](https://github.com/stefafafan). Thanks for the inspiration.
+
 ## License
 
 MIT. See [LICENSE](./LICENSE) for details.
