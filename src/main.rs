@@ -919,13 +919,25 @@ fn get_parent_tree(repo: &ReadonlyRepo, commit: &Commit) -> MergedTree {
     MergedTree::resolved(repo.store().clone(), repo.store().empty_tree_id().clone())
 }
 
+/// Print a warning listing the files that were collapsed out of the LLM diff.
+fn report_collapsed(collapsed_paths: &[String]) {
+    if collapsed_paths.is_empty() {
+        return;
+    }
+    let mark = "!".yellow().dimmed();
+    eprintln!("  {mark} {} files collapsed from LLM diff:", collapsed_paths.len());
+    for path in collapsed_paths {
+        eprintln!("  {mark}   {path}");
+    }
+}
+
 /// Generate a diff between a commit and its parent, with size validation.
-/// Returns `Some((diff, collapsed_count))` or `None` if unchanged.
+/// Returns `Some((diff, collapsed_paths))` or `None` if unchanged.
 async fn generate_diff(
     repo: &ReadonlyRepo,
     commit: &Commit,
     workspace_root: &Path,
-) -> Result<Option<(String, usize)>> {
+) -> Result<Option<(String, Vec<String>)>> {
     let current_tree = commit.tree();
     let parent_tree = get_parent_tree(repo, commit);
 
@@ -935,7 +947,7 @@ async fn generate_diff(
 
     let collapse_matcher = build_collapse_matcher(&CONFIG.diff.collapse_patterns);
     let gitattr_matcher = load_gitattributes(workspace_root);
-    let TreeDiffResult { mut diff, collapsed_count } = get_tree_diff(
+    let TreeDiffResult { mut diff, collapsed_paths } = get_tree_diff(
         repo,
         &parent_tree,
         &current_tree,
@@ -969,7 +981,7 @@ async fn generate_diff(
         );
     }
 
-    Ok(Some((diff, collapsed_count)))
+    Ok(Some((diff, collapsed_paths)))
 }
 
 /// Generate a commit message from a diff using the configured LLM backend.
@@ -1019,16 +1031,14 @@ async fn run_commit(
         .context("workspace should have a working-copy commit")?;
     let wc_commit = repo.store().get_commit(wc_commit_id)?;
 
-    let Some((diff, collapsed_count)) =
+    let Some((diff, collapsed_paths)) =
         generate_diff(&repo, &wc_commit, workspace.workspace_root()).await?
     else {
         println!("No changes detected, nothing to commit");
         return Ok(());
     };
 
-    if collapsed_count > 0 {
-        eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
-    }
+    report_collapsed(&collapsed_paths);
 
     let prompts = load_prompts(workspace, &repo, &wc_commit, no_instructions);
     let instruction_prompts: &[String] = if infer { &prompts } else { &[] };
@@ -1082,16 +1092,14 @@ async fn run_describe(
         );
     }
 
-    let Some((diff, collapsed_count)) =
+    let Some((diff, collapsed_paths)) =
         generate_diff(&repo, &commit, workspace.workspace_root()).await?
     else {
         println!("No changes in revision {short_id}, nothing to describe");
         return Ok(());
     };
 
-    if collapsed_count > 0 {
-        eprintln!("  {} {collapsed_count} files collapsed from LLM diff", "!".yellow().dimmed());
-    }
+    report_collapsed(&collapsed_paths);
 
     let prompts = load_prompts(workspace, &repo, &commit, no_instructions);
     let instruction_prompts: &[String] = if infer { &prompts } else { &[] };
