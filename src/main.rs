@@ -63,8 +63,114 @@ use tracing::{Level, debug, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 use unicode_width::UnicodeWidthStr;
 
+const JC_LONG_ABOUT: &str = "\
+jc generates conventional commit messages and bookmark names for jj workspaces using an LLM backend.
+
+With no subcommand, jc runs `commit`: it snapshots the working copy, compares the working-copy commit against its parent, asks the configured backend for a message, and creates a jj commit.
+
+Use `jc <command> --help` for command-specific inputs, side effects, and examples.";
+
+const JC_AFTER_LONG_HELP: &str = "\
+LLM QUICK REFERENCE:
+  - Default action: `jc` is equivalent to `jc commit`.
+  - Safe preview: add `--dry-run` to `commit`, `describe`, or `bookmark` to print the generated result without mutating the repo.
+  - Workspace selection: use `-p <path>` when running from outside the jj workspace.
+  - Backend/model: use `--backend codex|claude`, `--model <model>`, or env vars `JC_BACKEND` and `JC_MODEL`.
+  - Language: `commit` and `describe` accept `--language <name>` or `JC_LANGUAGE`.
+  - Prompt capture: `jc add` records stdin for later commit messages; `jc install` adds the hook that runs it.
+  - Prompt inclusion: recorded prompts are appended unless `--no-instructions` is used; `--infer` asks the LLM to keep only relevant prompts.
+  - Output: successful mutating commands print a human summary; dry runs print only generated text or a bookmark name.
+
+EXAMPLES:
+  jc
+  jc commit --dry-run
+  jc describe --revision @- --dry-run
+  jc bookmark --prefix feature --dry-run
+  echo \"Refactor login flow\" | jc add -p /path/to/workspace";
+
+const ADD_LONG_ABOUT: &str = "\
+Record a user prompt for the current workspace.
+
+The prompt is read from stdin and stored outside the repository. Later `jc commit` and `jc describe` can append recorded prompts as an \"AI Instructions\" section.";
+
+const ADD_AFTER_LONG_HELP: &str = "\
+INPUT:
+  Accepts plain text, or a coding-agent hook payload as JSON. For JSON input, jc uses the first string field found among `prompt`, `user_prompt`, and `input`.
+
+EXAMPLES:
+  echo \"Add JWT authentication\" | jc add
+  jc add -p /path/to/workspace < prompt.txt";
+
+const INSTALL_LONG_ABOUT: &str = "\
+Install the UserPromptSubmit hook for this workspace.
+
+jc writes or updates `.claude/settings.local.json` so future prompts are passed to `jc add -p <workspace-root>` automatically. Existing unrelated settings and hooks are preserved.";
+
+const INSTALL_AFTER_LONG_HELP: &str = "\
+BEHAVIOR:
+  - Creates `.claude/settings.local.json` if needed.
+  - Re-running is idempotent.
+  - If the workspace path changed, the existing jc hook is updated instead of duplicated.
+
+EXAMPLES:
+  jc install
+  jc install -p /path/to/workspace";
+
+const BOOKMARK_LONG_ABOUT: &str = "\
+Generate or move a jj bookmark for the current branch.
+
+jc compares commit summaries in the `from..to` range. If a local bookmark already exists in that range, jc moves it to the target revision. Otherwise it asks the LLM for a new bookmark name and exports the resulting bookmark to git refs.";
+
+const BOOKMARK_AFTER_LONG_HELP: &str = "\
+DEFAULTS:
+  - `--from` tries develop, main, master, then trunk, preferring `<name>@origin` over local `<name>`.
+  - `--to` defaults to `@`; if `@` is empty, jc uses `@-` as the bookmark target.
+
+EXAMPLES:
+  jc bookmark
+  jc bookmark --dry-run
+  jc bookmark --from main@origin --to @ --prefix feature
+  jc b --prefix fix";
+
+const COMMIT_LONG_ABOUT: &str = "\
+Generate a commit message and create a jj commit.
+
+jc snapshots the working copy, diffs the working-copy commit against its parent, asks the selected LLM backend for a conventional commit message, optionally appends recorded user prompts, and commits the current tree with that message.";
+
+const COMMIT_AFTER_LONG_HELP: &str = "\
+BEHAVIOR:
+  - This is the default command: `jc` is the same as `jc commit`.
+  - If the working-copy commit already has a description, jc skips it unless `--force` is supplied.
+  - `--dry-run` prints the generated commit message and creates no commit.
+  - `--no-instructions` omits recorded prompts from the final message.
+  - `--infer` passes recorded prompts to the LLM so only relevant prompts are quoted.
+
+EXAMPLES:
+  jc
+  jc commit --dry-run
+  jc commit --language Japanese
+  jc c --force --no-instructions";
+
+const DESCRIBE_LONG_ABOUT: &str = "\
+Generate and set a jj commit description without creating a new commit.
+
+jc resolves the requested revision, generates a message from its diff against the first parent, and rewrites that commit's description in place.";
+
+const DESCRIBE_AFTER_LONG_HELP: &str = "\
+BEHAVIOR:
+  - Defaults to `--revision @`.
+  - When describing `@`, jc snapshots the working copy first.
+  - Refuses to overwrite an existing description unless `--force` is supplied.
+  - `--dry-run` prints the generated description and does not rewrite the commit.
+
+EXAMPLES:
+  jc describe
+  jc describe --revision @- --dry-run
+  jc d -r @ --force
+  jc d --language Japanese";
+
 #[derive(Parser, Debug)]
-#[command(about, version)]
+#[command(about, version, long_about = JC_LONG_ABOUT, after_long_help = JC_AFTER_LONG_HELP)]
 struct Args {
     /// Path to the workspace (defaults to current directory)
     #[arg(short, long, global = true)]
@@ -85,14 +191,15 @@ struct Args {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Record a user prompt (read from stdin) to fold into the next commit message
-    #[command(alias = "a")]
+    #[command(visible_alias = "a", long_about = ADD_LONG_ABOUT, after_long_help = ADD_AFTER_LONG_HELP)]
     Add,
     /// Install the `UserPromptSubmit` hook for this workspace into .claude/settings.local.json
+    #[command(long_about = INSTALL_LONG_ABOUT, after_long_help = INSTALL_AFTER_LONG_HELP)]
     Install,
     /// Generate a bookmark name for commits between the current revision and a base
-    #[command(alias = "b")]
+    #[command(visible_alias = "b", long_about = BOOKMARK_LONG_ABOUT, after_long_help = BOOKMARK_AFTER_LONG_HELP)]
     Bookmark {
-        /// Base revision to compare against (default: main@origin or main)
+        /// Base revision to compare against (default: develop/main/master/trunk at origin or local)
         #[arg(short, long)]
         from: Option<String>,
 
@@ -109,7 +216,7 @@ enum Commands {
         dry_run: bool,
     },
     /// Generate a commit message and commit changes (default command)
-    #[command(alias = "c")]
+    #[command(visible_alias = "c", long_about = COMMIT_LONG_ABOUT, after_long_help = COMMIT_AFTER_LONG_HELP)]
     Commit {
         /// Language to use for commit messages
         #[arg(short, long, default_value = "English", env = "JC_LANGUAGE")]
@@ -133,7 +240,7 @@ enum Commands {
         infer: bool,
     },
     /// Generate and set a commit description without creating a new commit
-    #[command(alias = "d")]
+    #[command(visible_alias = "d", long_about = DESCRIBE_LONG_ABOUT, after_long_help = DESCRIBE_AFTER_LONG_HELP)]
     Describe {
         /// Revision to describe (default: @)
         #[arg(short, long, default_value = "@")]
@@ -1203,9 +1310,61 @@ fn print_file_changes(changes: &FileChangeSummary) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn stripped_width(line: &str) -> usize {
         strip_ansi_codes(line).width()
+    }
+
+    fn long_help(mut command: clap::Command) -> String {
+        let mut buffer = Vec::new();
+        command.write_long_help(&mut buffer).unwrap();
+        String::from_utf8(buffer).unwrap()
+    }
+
+    fn subcommand_long_help(name: &str) -> String {
+        let mut command = Args::command();
+        let subcommand = command.find_subcommand_mut(name).unwrap();
+        let mut buffer = Vec::new();
+        subcommand.write_long_help(&mut buffer).unwrap();
+        String::from_utf8(buffer).unwrap()
+    }
+
+    fn normalize_whitespace(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn top_level_help_has_llm_quick_reference() {
+        let help = long_help(Args::command());
+        let normalized = normalize_whitespace(&help);
+
+        assert!(help.contains("LLM QUICK REFERENCE:"));
+        assert!(normalized.contains("Default action: `jc` is equivalent to `jc commit`."));
+        assert!(normalized.contains("Prompt capture: `jc add` records stdin"));
+        assert!(help.contains("jc bookmark --prefix feature --dry-run"));
+    }
+
+    #[test]
+    fn commit_help_documents_default_command_and_dry_run() {
+        let help = subcommand_long_help("commit");
+        let normalized = normalize_whitespace(&help);
+
+        assert!(
+            normalized.contains("This is the default command: `jc` is the same as `jc commit`.")
+        );
+        assert!(normalized.contains("`--dry-run` prints the generated commit message"));
+        assert!(help.contains("jc c --force --no-instructions"));
+    }
+
+    #[test]
+    fn bookmark_help_matches_default_base_resolution() {
+        let help = subcommand_long_help("bookmark");
+        let normalized = normalize_whitespace(&help);
+
+        assert!(normalized.contains("tries develop, main, master, then trunk"));
+        assert!(normalized.contains("preferring `<name>@origin` over local `<name>`"));
+        assert!(normalized.contains("if `@` is empty, jc uses `@-`"));
     }
 
     #[test]
