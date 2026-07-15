@@ -871,7 +871,6 @@ async fn evaluate_revset(
         date_pattern_context: DatePatternContext::Local(Local::now()),
         default_ignored_remote: None,
         fileset_aliases_map: &fileset_aliases_map,
-        use_glob_by_default: false,
         extensions: &extensions,
         workspace: Some(workspace_ctx),
     };
