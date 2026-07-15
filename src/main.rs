@@ -38,7 +38,7 @@ use jj_lib::{
     commit::Commit,
     config::{ConfigLayer, ConfigResolutionContext, ConfigSource, StackedConfig, resolve},
     dsl_util::AliasesMap,
-    git::{GitImportOptions, export_refs, import_refs},
+    git::{self, GitImportOptions, export_refs, import_refs},
     gitignore::GitIgnoreFile,
     id_prefix::IdPrefixContext,
     matchers::{EverythingMatcher, NothingMatcher},
@@ -463,6 +463,13 @@ async fn create_commit(
 
     mut_repo.set_wc_commit(workspace.workspace_name().to_owned(), new_wc_commit.id().clone())?;
 
+    // Keep Git HEAD and its index in sync with the new working-copy parent in
+    // colocated repositories. `jj` does this when finishing every transaction;
+    // without it, `git status` can report the just-committed changes again.
+    if is_colocated_git_workspace(workspace, &repo) {
+        git::reset_head(mut_repo, &new_wc_commit).await?;
+    }
+
     let new_repo = tx.commit("auto-commit via jc").await?;
 
     // Finish the working copy with the new state
@@ -487,6 +494,24 @@ async fn create_commit(
     print_file_changes(file_changes);
 
     Ok(())
+}
+
+fn is_colocated_git_workspace(workspace: &Workspace, repo: &ReadonlyRepo) -> bool {
+    let Ok(git_backend) = git::get_git_backend(repo.store()) else {
+        return false;
+    };
+    let Some(git_workdir) = git_backend.git_workdir() else {
+        return false;
+    };
+
+    if git_workdir == workspace.workspace_root() {
+        return true;
+    }
+
+    match (git_workdir.canonicalize(), workspace.workspace_root().canonicalize()) {
+        (Ok(git_workdir), Ok(workspace_root)) => git_workdir == workspace_root,
+        _ => false,
+    }
 }
 
 #[tokio::main]
