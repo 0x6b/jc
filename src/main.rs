@@ -38,7 +38,7 @@ use jj_lib::{
     commit::Commit,
     config::{ConfigLayer, ConfigResolutionContext, ConfigSource, StackedConfig, resolve},
     dsl_util::AliasesMap,
-    git::{self, GitImportOptions, export_refs, import_refs},
+    git::{GitImportOptions, export_refs, get_git_backend, import_refs, reset_head},
     gitignore::GitIgnoreFile,
     id_prefix::IdPrefixContext,
     matchers::{EverythingMatcher, NothingMatcher},
@@ -199,7 +199,8 @@ enum Commands {
     /// Generate a bookmark name for commits between the current revision and a base
     #[command(visible_alias = "b", long_about = BOOKMARK_LONG_ABOUT, after_long_help = BOOKMARK_AFTER_LONG_HELP)]
     Bookmark {
-        /// Base revision to compare against (default: develop/main/master/trunk at origin or local)
+        /// Base revision to compare against (default: develop/main/master/trunk at origin or
+        /// local)
         #[arg(short, long)]
         from: Option<String>,
 
@@ -467,7 +468,7 @@ async fn create_commit(
     // colocated repositories. `jj` does this when finishing every transaction;
     // without it, `git status` can report the just-committed changes again.
     if is_colocated_git_workspace(workspace, &repo) {
-        git::reset_head(mut_repo, &new_wc_commit).await?;
+        reset_head(mut_repo, &new_wc_commit).await?;
     }
 
     let new_repo = tx.commit("auto-commit via jc").await?;
@@ -497,7 +498,7 @@ async fn create_commit(
 }
 
 fn is_colocated_git_workspace(workspace: &Workspace, repo: &ReadonlyRepo) -> bool {
-    let Ok(git_backend) = git::get_git_backend(repo.store()) else {
+    let Ok(git_backend) = get_git_backend(repo.store()) else {
         return false;
     };
     let Some(git_workdir) = git_backend.git_workdir() else {
@@ -1333,14 +1334,17 @@ fn print_file_changes(changes: &FileChangeSummary) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(test)]
+    use clap::Command;
     use clap::CommandFactory;
+
+    use super::*;
 
     fn stripped_width(line: &str) -> usize {
         strip_ansi_codes(line).width()
     }
 
-    fn long_help(mut command: clap::Command) -> String {
+    fn long_help(mut command: Command) -> String {
         let mut buffer = Vec::new();
         command.write_long_help(&mut buffer).unwrap();
         String::from_utf8(buffer).unwrap()

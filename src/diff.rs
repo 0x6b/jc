@@ -500,7 +500,12 @@ pub async fn get_tree_diff(
         }
     }
 
-    debug!(file_count, collapsed_count = collapsed_paths.len(), output_len = output.len(), "Tree diff complete");
+    debug!(
+        file_count,
+        collapsed_count = collapsed_paths.len(),
+        output_len = output.len(),
+        "Tree diff complete"
+    );
     Ok(TreeDiffResult { diff: output, collapsed_paths })
 }
 
